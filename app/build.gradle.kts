@@ -25,6 +25,9 @@ val devProperties = Properties().apply {
     }
 }
 
+val releaseKeystoreFile = rootProject.file("nuviotv.jks")
+val hasReleaseKeystore = releaseKeystoreFile.exists()
+
 android {
     namespace = "com.nuvio.tv"
     compileSdk = 36
@@ -55,14 +58,18 @@ android {
         create("release") {
             keyAlias = "nuviotv"
             keyPassword = "815787"
-            storeFile = file("../nuviotv.jks")
+            storeFile = releaseKeystoreFile
             storePassword = "815787"
         }
     }
 
     buildTypes {
         debug {
-            signingConfig = signingConfigs.getByName("release")
+            if (hasReleaseKeystore) {
+                signingConfig = signingConfigs.getByName("release")
+            } else {
+                logger.lifecycle("nuviotv.jks not found; using default debug signing config for debug builds")
+            }
             isDebuggable = true
             isMinifyEnabled = false
 
