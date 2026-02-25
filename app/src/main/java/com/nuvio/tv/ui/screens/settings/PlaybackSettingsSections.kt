@@ -213,18 +213,6 @@ internal fun PlaybackSettingsSections(
 
             item {
                 ToggleSettingsItem(
-                    icon = Icons.Default.Timer,
-                    title = "OSD Clock",
-                    subtitle = "Show local time and remaining playback time while controls are visible.",
-                    isChecked = playerSettings.osdClockEnabled,
-                    onCheckedChange = onSetOsdClockEnabled,
-                    onFocused = { focusedSection = PlaybackSection.GENERAL },
-                    enabled = !isExternalPlayer
-                )
-            }
-
-            item {
-                ToggleSettingsItem(
                     icon = Icons.Default.History,
                     title = "Skip Intro",
                     subtitle = "Use introdb.app to detect intros and recaps.",
