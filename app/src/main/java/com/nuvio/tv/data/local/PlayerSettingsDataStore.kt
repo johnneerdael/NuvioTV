@@ -550,6 +550,12 @@ class PlayerSettingsDataStore @Inject constructor(
         }
     }
 
+    suspend fun setOsdClockEnabled(enabled: Boolean) {
+        store().edit { prefs ->
+            prefs[osdClockEnabledKey] = enabled
+        }
+    }
+
     suspend fun setSkipIntroEnabled(enabled: Boolean) {
         store().edit { prefs ->
             prefs[skipIntroEnabledKey] = enabled
