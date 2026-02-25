@@ -142,8 +142,6 @@ internal fun PlayerRuntimeController.observeSubtitleSettings() {
             streamReuseLastLinkEnabled = settings.streamReuseLastLinkEnabled
             streamAutoPlayModeSetting = settings.streamAutoPlayMode
             streamAutoPlayNextEpisodeEnabledSetting = settings.streamAutoPlayNextEpisodeEnabled
-            streamAutoPlayPreferBingeGroupForNextEpisodeSetting =
-                settings.streamAutoPlayPreferBingeGroupForNextEpisode
             nextEpisodeThresholdModeSetting = settings.nextEpisodeThresholdMode
             nextEpisodeThresholdPercentSetting = settings.nextEpisodeThresholdPercent
             nextEpisodeThresholdMinutesBeforeEndSetting = settings.nextEpisodeThresholdMinutesBeforeEnd

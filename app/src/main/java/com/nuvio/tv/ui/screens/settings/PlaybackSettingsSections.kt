@@ -95,7 +95,6 @@ internal fun PlaybackSettingsSections(
     onShowNextEpisodeThresholdModeDialog: () -> Unit,
     onShowReuseLastLinkCacheDialog: () -> Unit,
     onSetStreamAutoPlayNextEpisodeEnabled: (Boolean) -> Unit,
-    onSetStreamAutoPlayPreferBingeGroupForNextEpisode: (Boolean) -> Unit,
     onSetNextEpisodeThresholdPercent: (Float) -> Unit,
     onSetNextEpisodeThresholdMinutesBeforeEnd: (Float) -> Unit,
     onSetReuseLastLinkEnabled: (Boolean) -> Unit,
@@ -293,8 +292,6 @@ internal fun PlaybackSettingsSections(
                 onShowNextEpisodeThresholdModeDialog = onShowNextEpisodeThresholdModeDialog,
                 onShowReuseLastLinkCacheDialog = onShowReuseLastLinkCacheDialog,
                 onSetStreamAutoPlayNextEpisodeEnabled = onSetStreamAutoPlayNextEpisodeEnabled,
-                onSetStreamAutoPlayPreferBingeGroupForNextEpisode =
-                    onSetStreamAutoPlayPreferBingeGroupForNextEpisode,
                 onSetNextEpisodeThresholdPercent = onSetNextEpisodeThresholdPercent,
                 onSetNextEpisodeThresholdMinutesBeforeEnd = onSetNextEpisodeThresholdMinutesBeforeEnd,
                 onSetReuseLastLinkEnabled = onSetReuseLastLinkEnabled,
