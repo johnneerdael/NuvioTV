@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Nuvio TV Login</title>
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <main class="card">
+    <h1>Approve TV Login</h1>
+    <p>Sign in, then approve this TV session.</p>
+
+    <div class="row">
+      <div class="label">Code</div>
+      <div id="codeValue" class="value">-</div>
+    </div>
+
+    <div class="row">
+      <div class="label">Nonce</div>
+      <div id="nonceValue" class="value">-</div>
+    </div>
+
+    <section id="sessionInfo" class="row hidden">
+      <div class="label">Signed in as</div>
+      <div id="signedInAs" class="value">-</div>
+    </section>
+
+    <section id="loginBlock" class="row hidden">
+      <input id="emailInput" type="email" placeholder="Email" autocomplete="username" />
+      <div style="height:8px"></div>
+      <input id="passwordInput" type="password" placeholder="Password" autocomplete="current-password" />
+      <button id="signInBtn">Sign In</button>
+      <button id="signUpBtn" class="secondary">Create Account</button>
+    </section>
+
+    <section class="row">
+      <button id="approveBtn" class="hidden">Approve This TV</button>
+      <button id="signOutBtn" class="secondary hidden">Sign Out</button>
+    </section>
+
+    <div id="notice" class="notice info hidden"></div>
+  </main>
+
+  <script src="./config.js"></script>
+  <script type="module" src="./app.js"></script>
+</body>
+</html>

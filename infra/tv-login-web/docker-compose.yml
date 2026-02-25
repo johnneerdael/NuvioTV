@@ -1,0 +1,10 @@
+services:
+  tv-login-web:
+    build: .
+    container_name: nuvio-tv-login-web
+    ports:
+      - "8080:80"
+    environment:
+      SUPABASE_URL: ${SUPABASE_URL}
+      SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY}
+    restart: unless-stopped
