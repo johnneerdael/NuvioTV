@@ -124,8 +124,7 @@ Deno.serve(async (req) => {
     }
 
     const { data: verifyData, error: verifyError } = await publicClient.auth.verifyOtp({
-      type: "email",
-      email: ownerEmail,
+      type: "magiclink",
       token_hash: magicData.properties.hashed_token
     });
 

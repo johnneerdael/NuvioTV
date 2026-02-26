@@ -34,6 +34,11 @@ import javax.inject.Singleton
 @Module
 @InstallIn(SingletonComponent::class)
 object NetworkModule {
+    private fun normalizeBaseUrl(rawBaseUrl: String, fallback: String): String {
+        val trimmed = rawBaseUrl.trim()
+        if (trimmed.isBlank()) return fallback
+        return if (trimmed.endsWith('/')) trimmed else "$trimmed/"
+    }
 
     @Provides
     @Singleton
@@ -99,7 +104,7 @@ object NetworkModule {
         moshi: Moshi
     ): Retrofit =
         Retrofit.Builder()
-            .baseUrl(BuildConfig.TRAKT_API_URL.ifBlank { "https://api.trakt.tv/" })
+            .baseUrl(normalizeBaseUrl(BuildConfig.TRAKT_API_URL, "https://api.trakt.tv/"))
             .client(okHttpClient)
             .addConverterFactory(MoshiConverterFactory.create(moshi))
             .build()
@@ -124,7 +129,7 @@ object NetworkModule {
     @Named("parentalGuide")
     fun provideParentalGuideRetrofit(okHttpClient: OkHttpClient, moshi: Moshi): Retrofit =
         Retrofit.Builder()
-            .baseUrl(BuildConfig.PARENTAL_GUIDE_API_URL.ifEmpty { "https://localhost/" })
+            .baseUrl(normalizeBaseUrl(BuildConfig.PARENTAL_GUIDE_API_URL, "https://localhost/"))
             .client(okHttpClient)
             .addConverterFactory(MoshiConverterFactory.create(moshi))
             .build()
@@ -141,7 +146,7 @@ object NetworkModule {
     @Named("introDb")
     fun provideIntroDbRetrofit(okHttpClient: OkHttpClient, moshi: Moshi): Retrofit =
         Retrofit.Builder()
-            .baseUrl(BuildConfig.INTRODB_API_URL.ifEmpty { "https://localhost/" })
+            .baseUrl(normalizeBaseUrl(BuildConfig.INTRODB_API_URL, "https://localhost/"))
             .client(okHttpClient)
             .addConverterFactory(MoshiConverterFactory.create(moshi))
             .build()
@@ -205,7 +210,7 @@ object NetworkModule {
     @Named("trailer")
     fun provideTrailerRetrofit(okHttpClient: OkHttpClient, moshi: Moshi): Retrofit =
         Retrofit.Builder()
-            .baseUrl(BuildConfig.TRAILER_API_URL.ifEmpty { "https://localhost/" })
+            .baseUrl(normalizeBaseUrl(BuildConfig.TRAILER_API_URL, "https://localhost/"))
             .client(okHttpClient)
             .addConverterFactory(MoshiConverterFactory.create(moshi))
             .build()
@@ -238,12 +243,10 @@ object NetworkModule {
     @Singleton
     @Named("seriesGraph")
     fun provideSeriesGraphRetrofit(okHttpClient: OkHttpClient, moshi: Moshi): Retrofit {
-        val rawBaseUrl = BuildConfig.IMDB_RATINGS_API_BASE_URL
-        val normalizedBaseUrl = if (rawBaseUrl.isNotBlank()) {
-            if (rawBaseUrl.endsWith('/')) rawBaseUrl else "$rawBaseUrl/"
-        } else {
-            "http://localhost/"
-        }
+        val normalizedBaseUrl = normalizeBaseUrl(
+            rawBaseUrl = BuildConfig.IMDB_RATINGS_API_BASE_URL,
+            fallback = "http://localhost/"
+        )
         return Retrofit.Builder()
             .baseUrl(normalizedBaseUrl)
             .client(okHttpClient)
@@ -260,12 +263,10 @@ object NetworkModule {
     @Singleton
     @Named("imdbTapframe")
     fun provideImdbTapframeRetrofit(okHttpClient: OkHttpClient, moshi: Moshi): Retrofit {
-        val rawBaseUrl = BuildConfig.IMDB_TAPFRAME_API_BASE_URL
-        val normalizedBaseUrl = if (rawBaseUrl.isNotBlank()) {
-            if (rawBaseUrl.endsWith('/')) rawBaseUrl else "$rawBaseUrl/"
-        } else {
-            "http://localhost/"
-        }
+        val normalizedBaseUrl = normalizeBaseUrl(
+            rawBaseUrl = BuildConfig.IMDB_TAPFRAME_API_BASE_URL,
+            fallback = "http://localhost/"
+        )
         return Retrofit.Builder()
             .baseUrl(normalizedBaseUrl)
             .client(okHttpClient)

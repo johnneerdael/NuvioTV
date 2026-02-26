@@ -481,10 +481,18 @@ class AccountViewModel @Inject constructor(
             message.contains("tv login") && message.contains("expired") -> "QR login expired. Please try again."
             message.contains("tv login") && message.contains("invalid") -> "Invalid QR login code."
             message.contains("tv login") && message.contains("nonce") -> "This QR login was requested from another device."
+            message.contains("tv login exchange failed") && message.contains("401") && message.contains("invalid jwt") ->
+                "QR exchange authentication failed. Check Supabase Edge Function JWT settings."
+            message.contains("invalid jwt") ->
+                "QR exchange authentication failed. Check Supabase Edge Function JWT settings."
+            message.contains("failed to mint owner session") && message.contains("token_hash") ->
+                "QR exchange backend is outdated. Redeploy tv-logins-exchange function."
             message.contains("start_tv_login_session") && message.contains("could not find the function") ->
                 "QR login service is outdated. Reapply TV login SQL setup."
             message.contains("gen_random_bytes") && message.contains("does not exist") ->
                 "QR login backend is missing setup. Update TV login SQL setup."
+            message.contains("expires_at") && message.contains("ambiguous") ->
+                "QR login backend is outdated. Reapply TV login SQL setup."
             message.contains("invalid tv login redirect base url") ->
                 "QR login URL is misconfigured."
             message.contains("invalid device nonce") ->

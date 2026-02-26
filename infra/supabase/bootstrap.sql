@@ -321,9 +321,11 @@ begin
   if p_redirect_base_url is null or length(trim(p_redirect_base_url)) = 0 then raise exception 'Invalid TV login redirect base URL'; end if;
   if trim(p_redirect_base_url) !~* '^https?://[A-Za-z0-9\.-]+' then raise exception 'Invalid TV login redirect base URL'; end if;
 
-  update public.tv_login_sessions
+  update public.tv_login_sessions tls
      set status = 'expired'
-   where requester_user_id = v_requester and status = 'pending' and expires_at <= now();
+   where tls.requester_user_id = v_requester
+     and tls.status = 'pending'
+     and tls.expires_at <= now();
 
   v_base_url := regexp_replace(trim(p_redirect_base_url), '/+$', '');
 

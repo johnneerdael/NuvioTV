@@ -17,16 +17,19 @@ This is the web approval page used by NuvioTV QR sign-in.
 ```js
 window.TV_LOGIN_CONFIG = {
   SUPABASE_URL: "https://YOUR_PROJECT_REF.supabase.co",
-  SUPABASE_ANON_KEY: "YOUR_SUPABASE_ANON_KEY"
+  SUPABASE_ANON_KEY: "YOUR_SUPABASE_ANON_KEY",
+  EMAIL_REDIRECT_URL: "https://tv-login.example.com"
 };
 ```
+
+`EMAIL_REDIRECT_URL` is optional but recommended. If omitted, signup confirmation redirects to the current page URL.
 
 ## Docker Hosting
 
 You can host this site in Docker with runtime env injection.
 
 1. Create `.env` from `.env.example`.
-2. Fill `SUPABASE_URL` and `SUPABASE_ANON_KEY`.
+2. Fill `SUPABASE_URL`, `SUPABASE_ANON_KEY`, and `EMAIL_REDIRECT_URL`.
 3. Run:
 
 ```powershell
@@ -46,6 +49,15 @@ The app URL must match your `TV_LOGIN_WEB_BASE_URL` setting (without query param
 Nuvio app will open:
 
 - `https://tv-login.example.com?code=XXXX&nonce=YYYY`
+
+## Supabase Auth URL Configuration (Required)
+
+In Supabase Dashboard -> Authentication -> URL Configuration:
+
+1. Set **Site URL** to your hosted login URL, for example `https://nuviotv.thepi.es`.
+2. Add `https://nuviotv.thepi.es` to **Redirect URLs**.
+
+If Site URL remains `http://localhost:3000`, confirmation emails will redirect to localhost.
 
 ## Behavior
 

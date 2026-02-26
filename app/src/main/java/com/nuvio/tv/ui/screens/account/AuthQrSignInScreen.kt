@@ -81,7 +81,8 @@ fun AuthQrSignInScreen(
             uiState.authState !is AuthState.Loading &&
             !isSignedIn &&
             uiState.qrLoginCode.isNullOrBlank() &&
-            !uiState.isLoading
+            !uiState.isLoading &&
+            uiState.error.isNullOrBlank()
         ) {
             viewModel.startQrLogin()
         }

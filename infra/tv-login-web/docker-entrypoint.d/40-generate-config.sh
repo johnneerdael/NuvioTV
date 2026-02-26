@@ -7,7 +7,8 @@ if [ -n "${SUPABASE_URL:-}" ] && [ -n "${SUPABASE_ANON_KEY:-}" ]; then
   cat > "$CFG" <<EOF
 window.TV_LOGIN_CONFIG = {
   SUPABASE_URL: "${SUPABASE_URL}",
-  SUPABASE_ANON_KEY: "${SUPABASE_ANON_KEY}"
+  SUPABASE_ANON_KEY: "${SUPABASE_ANON_KEY}",
+  EMAIL_REDIRECT_URL: "${EMAIL_REDIRECT_URL:-}"
 };
 EOF
   echo "Generated config.js from environment variables."
