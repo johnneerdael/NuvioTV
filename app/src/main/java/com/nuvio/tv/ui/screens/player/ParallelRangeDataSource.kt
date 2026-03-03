@@ -33,7 +33,9 @@ import java.util.concurrent.atomic.AtomicBoolean
 class ParallelRangeDataSource(
     private val upstreamFactory: OkHttpDataSource.Factory,
     private val parallelConnections: Int = PlayerSettings.DEFAULT_PARALLEL_CONNECTION_COUNT,
-    private val chunkSize: Long = PlayerSettings.DEFAULT_PARALLEL_CHUNK_SIZE_MB.toLong() * 1024 * 1024
+    private val chunkSize: Long = PlayerSettings.DEFAULT_PARALLEL_CHUNK_SIZE_MB.toLong() * 1024 * 1024,
+    private val shouldAllowBackgroundPrefetch: () -> Boolean = { true },
+    private val onResolvedUri: (Uri?) -> Unit = {}
 ) : DataSource {
 
     companion object {
@@ -95,6 +97,7 @@ class ParallelRangeDataSource(
         try {
             openLength = probeSource.open(dataSpec)
             resolvedUri = probeSource.uri // Final URL after redirects (CDN URL)
+            onResolvedUri(resolvedUri)
         } catch (e: Exception) {
             probeSource.close()
             throw e
@@ -144,7 +147,7 @@ class ParallelRangeDataSource(
 
         val toRead = minOf(length.toLong(), bytesRemaining).toInt()
 
-        if (bootstrapPrefetchDeferred) {
+        if (bootstrapPrefetchDeferred && shouldAllowBackgroundPrefetch()) {
             bootstrapPrefetchDeferred = false
             scheduleChunks()
         }
@@ -187,6 +190,7 @@ class ParallelRangeDataSource(
     }
 
     private fun scheduleChunks() {
+        if (!shouldAllowBackgroundPrefetch()) return
         val currentChunkIdx = position / chunkSize
         val maxAhead = parallelConnections + 1
 
@@ -352,10 +356,18 @@ class ParallelRangeDataSource(
     class Factory(
         private val upstreamFactory: OkHttpDataSource.Factory,
         private val parallelConnections: Int = PlayerSettings.DEFAULT_PARALLEL_CONNECTION_COUNT,
-        private val chunkSize: Long = PlayerSettings.DEFAULT_PARALLEL_CHUNK_SIZE_MB.toLong() * 1024 * 1024
+        private val chunkSize: Long = PlayerSettings.DEFAULT_PARALLEL_CHUNK_SIZE_MB.toLong() * 1024 * 1024,
+        private val shouldAllowBackgroundPrefetch: () -> Boolean = { true },
+        private val onResolvedUri: (Uri?) -> Unit = {}
     ) : DataSource.Factory {
         override fun createDataSource(): DataSource {
-            return ParallelRangeDataSource(upstreamFactory, parallelConnections, chunkSize)
+            return ParallelRangeDataSource(
+                upstreamFactory = upstreamFactory,
+                parallelConnections = parallelConnections,
+                chunkSize = chunkSize,
+                shouldAllowBackgroundPrefetch = shouldAllowBackgroundPrefetch,
+                onResolvedUri = onResolvedUri
+            )
         }
     }
 }

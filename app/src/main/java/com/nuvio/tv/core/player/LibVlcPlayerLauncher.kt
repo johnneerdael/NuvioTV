@@ -8,12 +8,15 @@ object LibVlcPlayerLauncher {
     fun launch(
         context: Context,
         streamUrl: String,
-        title: String?
+        title: String?,
+        subtitleUrl: String? = null
     ): Boolean {
         if (streamUrl.isBlank()) return false
+        if (!LibVlcPlaybackConfig.isCpuCompatible(context)) return false
         val intent = Intent(context, LibVlcPlayerActivity::class.java).apply {
             putExtra(LibVlcPlayerActivity.EXTRA_STREAM_URL, streamUrl)
             putExtra(LibVlcPlayerActivity.EXTRA_TITLE, title)
+            putExtra(LibVlcPlayerActivity.EXTRA_SUBTITLE_URL, subtitleUrl)
             if (context !is android.app.Activity) {
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }

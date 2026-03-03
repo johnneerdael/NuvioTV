@@ -22,6 +22,8 @@ import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.focusable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -572,8 +574,7 @@ fun PlayerScreen(
             UnsupportedPlaybackOverlay(
                 info = unsupportedPlayback,
                 onOpenInLibVlc = { viewModel.onEvent(PlayerEvent.OnOpenUnsupportedInLibVlc) },
-                onOpenInExternalPlayer = { viewModel.onEvent(PlayerEvent.OnOpenUnsupportedInExternalPlayer) },
-                onBack = exitPlayer
+                onOpenInExternalPlayer = { viewModel.onEvent(PlayerEvent.OnOpenUnsupportedInExternalPlayer) }
             )
         }
 
@@ -1714,55 +1715,67 @@ private fun ErrorOverlay(
 private fun UnsupportedPlaybackOverlay(
     info: UnsupportedPlaybackInfo,
     onOpenInLibVlc: () -> Unit,
-    onOpenInExternalPlayer: () -> Unit,
-    onBack: () -> Unit
+    onOpenInExternalPlayer: () -> Unit
 ) {
     val libVlcFocusRequester = remember { FocusRequester() }
     val externalPlayerFocusRequester = remember { FocusRequester() }
-    val backFocusRequester = remember { FocusRequester() }
 
     LaunchedEffect(info.canOpenInLibVlc, info.canOpenInExternalPlayer) {
         delay(50)
         when {
             info.canOpenInLibVlc -> libVlcFocusRequester.requestFocus()
             info.canOpenInExternalPlayer -> externalPlayerFocusRequester.requestFocus()
-            else -> backFocusRequester.requestFocus()
         }
     }
 
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(Color.Black.copy(alpha = 0.92f))
+            .background(Color.Black.copy(alpha = 0.88f))
             .zIndex(3f),
         contentAlignment = Alignment.Center
     ) {
         Column(
             modifier = Modifier
-                .width(640.dp)
-                .clip(RoundedCornerShape(20.dp))
+                .width(760.dp)
+                .clip(RoundedCornerShape(24.dp))
                 .background(
                     Brush.verticalGradient(
-                        colors = listOf(Color(0xFF141414), Color(0xFF1C1C1C))
+                        colors = listOf(NuvioColors.BackgroundElevated, NuvioColors.BackgroundCard)
                     )
                 )
-                .padding(horizontal = 28.dp, vertical = 26.dp),
+                .border(
+                    width = 1.dp,
+                    color = Color.White.copy(alpha = 0.08f),
+                    shape = RoundedCornerShape(24.dp)
+                )
+                .padding(horizontal = 34.dp, vertical = 30.dp),
             horizontalAlignment = Alignment.Start,
-            verticalArrangement = Arrangement.spacedBy(16.dp)
+            verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
             Text(
                 text = info.title,
                 style = MaterialTheme.typography.headlineSmall,
-                color = Color.White
+                color = NuvioColors.TextPrimary,
+                modifier = Modifier.fillMaxWidth(),
+                textAlign = TextAlign.Center
             )
 
-            Text(
-                text = info.message,
-                style = MaterialTheme.typography.bodyLarge,
-                color = Color.White.copy(alpha = 0.78f)
-            )
+            if (info.message.isNotBlank()) {
+                Text(
+                    text = info.message,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = NuvioColors.TextSecondary
+                )
 
-            Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                Spacer(modifier = Modifier.height(2.dp))
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(14.dp, Alignment.CenterHorizontally),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
                 if (info.canOpenInLibVlc) {
                     UnsupportedOverlayButton(
                         text = "Open in LibVLC",
@@ -1770,11 +1783,7 @@ private fun UnsupportedPlaybackOverlay(
                         modifier = Modifier
                             .focusRequester(libVlcFocusRequester)
                             .focusProperties {
-                                right = if (info.canOpenInExternalPlayer) {
-                                    externalPlayerFocusRequester
-                                } else {
-                                    backFocusRequester
-                                }
+                                right = if (info.canOpenInExternalPlayer) externalPlayerFocusRequester else libVlcFocusRequester
                             }
                     )
                 }
@@ -1786,25 +1795,10 @@ private fun UnsupportedPlaybackOverlay(
                         modifier = Modifier
                             .focusRequester(externalPlayerFocusRequester)
                             .focusProperties {
-                                left = if (info.canOpenInLibVlc) libVlcFocusRequester else backFocusRequester
-                                right = backFocusRequester
+                                left = if (info.canOpenInLibVlc) libVlcFocusRequester else externalPlayerFocusRequester
                             }
                     )
                 }
-
-                UnsupportedOverlayButton(
-                    text = "Back",
-                    onClick = onBack,
-                    modifier = Modifier
-                        .focusRequester(backFocusRequester)
-                        .focusProperties {
-                            left = when {
-                                info.canOpenInExternalPlayer -> externalPlayerFocusRequester
-                                info.canOpenInLibVlc -> libVlcFocusRequester
-                                else -> backFocusRequester
-                            }
-                        }
-                )
             }
         }
     }
@@ -1816,18 +1810,34 @@ private fun UnsupportedOverlayButton(
     onClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val interactionSource = remember { MutableInteractionSource() }
+    val isFocused by interactionSource.collectIsFocusedAsState()
     Button(
         onClick = onClick,
-        modifier = modifier,
+        modifier = modifier
+            .border(
+                width = if (isFocused) 2.dp else 1.dp,
+                color = if (isFocused) NuvioColors.FocusRing else Color.White.copy(alpha = 0.14f),
+                shape = RoundedCornerShape(16.dp)
+            ),
+        interactionSource = interactionSource,
         colors = ButtonDefaults.colors(
-            containerColor = NuvioColors.BackgroundCard,
+            containerColor = Color.Transparent,
             contentColor = NuvioColors.TextPrimary,
-            focusedContainerColor = NuvioColors.FocusBackground,
-            focusedContentColor = NuvioColors.Primary
+            focusedContainerColor = NuvioColors.FocusBackground.copy(alpha = 0.16f),
+            focusedContentColor = NuvioColors.TextPrimary
         ),
-        shape = ButtonDefaults.shape(RoundedCornerShape(12.dp))
+        scale = ButtonDefaults.scale(
+            scale = 1f,
+            focusedScale = 1f,
+            pressedScale = 1f
+        ),
+        shape = ButtonDefaults.shape(RoundedCornerShape(16.dp))
     ) {
-        Text(text = text)
+        Text(
+            text = text,
+            style = MaterialTheme.typography.titleSmall
+        )
     }
 }
 

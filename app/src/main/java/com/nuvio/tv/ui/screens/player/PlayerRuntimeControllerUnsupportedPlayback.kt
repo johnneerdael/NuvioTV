@@ -13,8 +13,10 @@ internal fun PlayerRuntimeController.clearUnsupportedPlaybackOptions() {
 internal fun PlayerRuntimeController.showUnsupportedPlaybackOptions(
     reason: String,
     detail: String? = null,
-    title: String = "Stream not supported in built-in player",
-    message: String = "This stream is not supported by the built-in player. Open it in LibVLC or an external player instead."
+    title: String = "Unsupported Stream",
+    message: String = "",
+    allowLibVlc: Boolean = currentStreamUrl.isNotBlank(),
+    allowExternalPlayer: Boolean = currentStreamUrl.isNotBlank()
 ) {
     cancelFirstFrameWatchdog()
     media3PlaybackAwaitingValidation = false
@@ -37,8 +39,8 @@ internal fun PlayerRuntimeController.showUnsupportedPlaybackOptions(
             unsupportedPlayback = UnsupportedPlaybackInfo(
                 title = title,
                 message = message,
-                canOpenInLibVlc = currentStreamUrl.isNotBlank(),
-                canOpenInExternalPlayer = currentStreamUrl.isNotBlank()
+                canOpenInLibVlc = allowLibVlc,
+                canOpenInExternalPlayer = allowExternalPlayer
             )
         )
     }

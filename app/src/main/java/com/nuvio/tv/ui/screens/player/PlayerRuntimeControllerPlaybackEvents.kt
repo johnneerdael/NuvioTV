@@ -667,10 +667,21 @@ fun PlayerRuntimeController.onEvent(event: PlayerEvent) {
             val launched = LibVlcPlayerLauncher.launch(
                 context = currentHostActivity() ?: context,
                 streamUrl = currentStreamUrl,
-                title = _uiState.value.currentStreamName ?: title
+                title = _uiState.value.currentStreamName ?: title,
+                subtitleUrl = _uiState.value.selectedAddonSubtitle?.url
             )
             if (launched) {
+                clearUnsupportedPlaybackOptions()
                 releasePlayer()
+            } else {
+                showUnsupportedPlaybackOptions(
+                    reason = "libvlc-launch-unavailable",
+                    detail = "cpu-incompatible-or-launch-failed",
+                    title = "Unsupported Stream",
+                    message = "LibVLC is unavailable on this device. Use External Player instead.",
+                    allowLibVlc = false,
+                    allowExternalPlayer = currentStreamUrl.isNotBlank()
+                )
             }
         }
         PlayerEvent.OnOpenUnsupportedInExternalPlayer -> {
@@ -681,6 +692,7 @@ fun PlayerRuntimeController.onEvent(event: PlayerEvent) {
                 headers = currentHeaders
             )
             if (launched) {
+                clearUnsupportedPlaybackOptions()
                 releasePlayer()
             }
         }
