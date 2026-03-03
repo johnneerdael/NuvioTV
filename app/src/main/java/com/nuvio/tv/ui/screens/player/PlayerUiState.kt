@@ -121,7 +121,15 @@ data class PlayerUiState(
     // Aspect ratio / resize mode
     val resizeMode: Int = AspectRatioFrameLayout.RESIZE_MODE_FIT,
     val showAspectRatioIndicator: Boolean = false,
-    val aspectRatioIndicatorText: String = ""
+    val aspectRatioIndicatorText: String = "",
+    val unsupportedPlayback: UnsupportedPlaybackInfo? = null
+)
+
+data class UnsupportedPlaybackInfo(
+    val title: String,
+    val message: String,
+    val canOpenInLibVlc: Boolean = false,
+    val canOpenInExternalPlayer: Boolean = true
 )
 
 data class TrackInfo(
@@ -184,6 +192,8 @@ sealed class PlayerEvent {
     data object OnReloadSourceStreams : PlayerEvent()
     data class OnSourceAddonFilterSelected(val addonName: String?) : PlayerEvent()
     data class OnSourceStreamSelected(val stream: Stream) : PlayerEvent()
+    data object OnOpenUnsupportedInLibVlc : PlayerEvent()
+    data object OnOpenUnsupportedInExternalPlayer : PlayerEvent()
     data object OnDismissDialog : PlayerEvent()
     data object OnRetry : PlayerEvent()
     data object OnParentalGuideHide : PlayerEvent()

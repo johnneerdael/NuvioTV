@@ -8,6 +8,7 @@ import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.DataSpec
 import androidx.media3.datasource.TransferListener
 import androidx.media3.datasource.okhttp.OkHttpDataSource
+import java.io.InterruptedIOException
 import java.io.IOException
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedDeque
@@ -65,6 +66,7 @@ class ParallelRangeDataSource(
     private var currentChunk: DownloadedChunk? = null
     private var currentChunkIndex: Long = -1
     private var currentChunkReadOffset: Int = 0
+    private var bootstrapPrefetchDeferred: Boolean = false
 
     private val transferListeners = mutableListOf<TransferListener>()
 
@@ -75,6 +77,7 @@ class ParallelRangeDataSource(
         closed.set(false)
         originalDataSpec = dataSpec
         position = dataSpec.position
+        bootstrapPrefetchDeferred = false
 
         // Cancel any in-flight chunks from a previous open (e.g., after seek)
         cancelAllChunks()
@@ -121,12 +124,14 @@ class ParallelRangeDataSource(
             val chunk = readIntoChunk(probeSource)
             probeSource.close()
             chunks[firstChunkIndex] = CompletableFuture.completedFuture(chunk)
+            // Avoid startup churn from immediate background chunk fetches before the first real read.
+            // Media3 may perform additional opens during startup/sniffing, which can otherwise
+            // interrupt the first scheduled parallel chunk and create noisy retries.
+            bootstrapPrefetchDeferred = true
         } else {
             probeSource.close()
+            scheduleChunks()
         }
-
-        // Schedule remaining chunks for download
-        scheduleChunks()
 
         return openLength
     }
@@ -138,6 +143,11 @@ class ParallelRangeDataSource(
         if (bytesRemaining == 0L) return C.RESULT_END_OF_INPUT
 
         val toRead = minOf(length.toLong(), bytesRemaining).toInt()
+
+        if (bootstrapPrefetchDeferred) {
+            bootstrapPrefetchDeferred = false
+            scheduleChunks()
+        }
 
         val chunkIndex = position / chunkSize
 
@@ -202,7 +212,15 @@ class ParallelRangeDataSource(
                 if (closed.get()) throw IOException("DataSource closed")
                 lastException = e
                 if (attempt == 0) {
-                    Log.w(TAG, "Chunk $chunkIndex download failed (attempt 1), retrying: ${e.message}")
+                    if (e.isTransientInterruption()) {
+                        Log.d(TAG, "Chunk $chunkIndex interrupted during prefetch (attempt 1), retrying")
+                        try {
+                            Thread.sleep(50)
+                        } catch (_: InterruptedException) {
+                        }
+                    } else {
+                        Log.w(TAG, "Chunk $chunkIndex download failed (attempt 1), retrying: ${e.message}")
+                    }
                 }
             }
         }
@@ -229,6 +247,12 @@ class ParallelRangeDataSource(
         val chunk = readIntoChunk(ds)
         ds.close()
         return chunk
+    }
+
+    private fun Exception.isTransientInterruption(): Boolean {
+        if (this is InterruptedIOException || this is InterruptedException) return true
+        val cause = cause
+        return cause is InterruptedIOException || cause is InterruptedException
     }
 
     /** Read from an already-opened DataSource into a pooled chunk buffer. */

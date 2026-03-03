@@ -373,6 +373,7 @@ internal fun PlayerRuntimeController.cancelFirstFrameWatchdog() {
 
 internal fun PlayerRuntimeController.maybeScheduleFirstFrameWatchdog() {
     if (hasRenderedFirstFrame || !currentStreamHasVideoTrack) return
+    if (media3PlaybackAwaitingValidation) return
     val player = _exoPlayer ?: return
     if (player.playbackState != Player.STATE_READY || !player.playWhenReady) return
     if (firstFrameWatchdogJob?.isActive == true) return
@@ -400,30 +401,12 @@ internal fun PlayerRuntimeController.maybeScheduleFirstFrameWatchdog() {
                 "host=${Uri.parse(currentStreamUrl).host ?: "unknown"}"
         )
 
-        if (currentVideoTrackIsLikelyVc1 && !isVc1SoftwareFallbackActiveForCurrentPlayback) {
-            vc1SoftwarePreferredStreamUrls.add(currentStreamUrl)
-            Log.w(
-                PlayerRuntimeController.TAG,
-                "VIDEO_TIMEOUT: retrying with VC-1 software-preferred decoder path " +
-                    "host=${Uri.parse(currentStreamUrl).host ?: "unknown"} positionMs=$currentPosition"
-            )
-            retryCurrentStreamWithVc1SoftwareFallback(currentPosition)
-            return@launch
-        }
-
-        if (currentVideoTrackIsLikelyVc1 &&
-            !currentVideoTrackSelected &&
-            isVc1SoftwareFallbackActiveForCurrentPlayback &&
-            !isVc1TrackSelectionBypassActiveForCurrentPlayback
-        ) {
-            vc1TrackSelectionBypassStreamUrls.add(currentStreamUrl)
-            Log.w(
-                PlayerRuntimeController.TAG,
-                "VIDEO_TIMEOUT: retrying with VC-1 track-selection bypass " +
-                    "host=${Uri.parse(currentStreamUrl).host ?: "unknown"} positionMs=$currentPosition"
-            )
-            retryCurrentStreamWithVc1TrackSelectionBypass(currentPosition)
-        }
+        showUnsupportedPlaybackOptions(
+            reason = "no-first-frame-timeout",
+            detail = "positionMs=$currentPosition",
+            title = "Built-in player could not render this stream",
+            message = "The built-in player did not render a video frame for this stream. Open it in LibVLC or an external player instead."
+        )
     }
 }
 

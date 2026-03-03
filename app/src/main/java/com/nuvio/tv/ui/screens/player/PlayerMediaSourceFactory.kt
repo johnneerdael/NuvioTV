@@ -85,9 +85,17 @@ internal class PlayerMediaSourceFactory(private val context: Context) {
             okHttpFactory
         }
         val useVodCache = ENABLE_VOD_CACHE && !isHls && !isDash && shouldUseVodCache(url)
+        val previousVodCacheActive = currentVodCacheActive
         currentVodCacheUrl = url
         currentVodCacheActive = false
         val vodCacheMaxBytes = resolveVodCacheMaxBytes(context)
+        if (useVodCache && !isVodCacheDisabled) {
+            maybeApplyLiveVodCacheCapIncrease(
+                context = context,
+                requestedMaxBytes = vodCacheMaxBytes,
+                allowLiveReconfigure = !previousVodCacheActive
+            )
+        }
         val progressiveFactory = if (useVodCache && !isVodCacheDisabled) {
             val cache = getReadySimpleCache(vodCacheMaxBytes)
                 ?: getAnySimpleCache()?.also {
@@ -366,6 +374,60 @@ internal class PlayerMediaSourceFactory(private val context: Context) {
             }
         }
 
+        private fun maybeApplyLiveVodCacheCapIncrease(
+            context: Context,
+            requestedMaxBytes: Long,
+            allowLiveReconfigure: Boolean
+        ) {
+            val currentMaxBytes = configuredVodCacheMaxBytes
+            if (requestedMaxBytes <= 0L || currentMaxBytes <= 0L) return
+            if (requestedMaxBytes <= currentMaxBytes) return
+            if (requestedMaxBytes - currentMaxBytes < LIVE_CACHE_RECONFIGURE_MIN_DELTA_BYTES) return
+            if (!allowLiveReconfigure) {
+                maybeLogDeferredReconfigure(requestedMaxBytes)
+                return
+            }
+            val currentCache = sharedSimpleCache ?: return
+            synchronized(this) {
+                val liveCache = sharedSimpleCache ?: return
+                val liveCurrentMaxBytes = configuredVodCacheMaxBytes
+                if (requestedMaxBytes <= liveCurrentMaxBytes) return
+                if (requestedMaxBytes - liveCurrentMaxBytes < LIVE_CACHE_RECONFIGURE_MIN_DELTA_BYTES) {
+                    return
+                }
+                runCatching {
+                    Log.i(
+                        TAG,
+                        "Recreating VOD cache live to apply cap increase from " +
+                            "${liveCurrentMaxBytes / 1024L / 1024L}MB to " +
+                            "${requestedMaxBytes / 1024L / 1024L}MB"
+                    )
+                    liveCache.release()
+                    sharedSimpleCache = null
+                    configuredVodCacheMaxBytes = -1L
+                    getOrCreateSimpleCache(context, requestedMaxBytes)
+                    Log.i(
+                        TAG,
+                        "Applied VOD cache cap increase live with new cap=" +
+                            "${requestedMaxBytes / 1024L / 1024L}MB"
+                    )
+                }.onFailure { error ->
+                    Log.w(
+                        TAG,
+                        "Live VOD cache cap update failed, restoring previous cap=" +
+                            "${liveCurrentMaxBytes / 1024L / 1024L}MB",
+                        error
+                    )
+                    runCatching { getOrCreateSimpleCache(context, liveCurrentMaxBytes) }
+                        .onFailure { restoreError ->
+                            isVodCacheDisabled = true
+                            Log.e(TAG, "Disabling VOD cache after live reconfigure restore failure", restoreError)
+                        }
+                    maybeLogDeferredReconfigure(requestedMaxBytes)
+                }
+            }
+        }
+
         private fun startVodCacheInitialization(context: Context, maxBytes: Long) {
             if (isVodCacheDisabled) return
             if (getReadySimpleCache(maxBytes) != null) return
@@ -398,6 +460,8 @@ internal class PlayerMediaSourceFactory(private val context: Context) {
                     "to ${requestedMaxBytes / 1024L / 1024L}MB until app restart to avoid in-use cache reconfiguration."
             )
         }
+
+        private const val LIVE_CACHE_RECONFIGURE_MIN_DELTA_BYTES = 64L * 1024L * 1024L
     }
 }
 

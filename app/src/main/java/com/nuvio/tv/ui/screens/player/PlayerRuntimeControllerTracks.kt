@@ -19,6 +19,10 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.Locale
 
+private fun isHardUnsupportedFormat(@C.FormatSupport formatSupport: Int): Boolean {
+    return formatSupport == C.FORMAT_UNSUPPORTED_SUBTYPE || formatSupport == C.FORMAT_UNSUPPORTED_TYPE
+}
+
 internal fun PlayerRuntimeController.updateAvailableTracks(tracks: Tracks) {
     val audioTracks = mutableListOf<TrackInfo>()
     val subtitleTracks = mutableListOf<TrackInfo>()
@@ -178,6 +182,13 @@ internal fun PlayerRuntimeController.updateAvailableTracks(tracks: Tracks) {
                     "vc1TrackBypassActive=$isVc1TrackSelectionBypassActiveForCurrentPlayback"
             )
         }
+        if (!currentVideoTrackSelected && isHardUnsupportedFormat(currentVideoTrackBestSupport)) {
+            showUnsupportedPlaybackOptions(
+                reason = "unsupported-video-track",
+                detail = "support=${Util.getFormatSupportString(currentVideoTrackBestSupport)}"
+            )
+            return
+        }
         if (currentVideoTrackIsLikelyVc1 &&
             !currentVideoTrackSelected &&
             isVc1SoftwareFallbackActiveForCurrentPlayback &&
@@ -257,6 +268,9 @@ internal fun PlayerRuntimeController.updateAvailableTracks(tracks: Tracks) {
             selectedAudioTrackIndex = selectedAudioIndex,
             selectedSubtitleTrackIndex = selectedSubtitleIndex
         )
+    }
+    if (hasVideoTrack || audioTracks.isNotEmpty() || subtitleTracks.isNotEmpty()) {
+        maybeAllowValidatedMedia3Playback()
     }
     if (currentStreamHasVideoTrack) {
         maybeScheduleFirstFrameWatchdog()

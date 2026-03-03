@@ -135,6 +135,7 @@ class PlayerRuntimeController(
         get() = _exoPlayer
 
     internal var progressJob: Job? = null
+    internal var vodTelemetryJob: Job? = null
     internal var firstFrameWatchdogJob: Job? = null
     internal var hideControlsJob: Job? = null
     internal var hideSeekOverlayJob: Job? = null
@@ -188,6 +189,8 @@ class PlayerRuntimeController(
     internal var hasAppliedRememberedAudioSelection: Boolean = false
 
     internal var lastBufferLogTimeMs: Long = 0L
+    internal var lastVodTelemetryRefreshTimeMs: Long = 0L
+    internal var cachedVodCacheLogState: String = "vod=warming"
     
     internal var loudnessEnhancer: LoudnessEnhancer? = null
     internal var trackSelector: DefaultTrackSelector? = null
@@ -217,6 +220,7 @@ class PlayerRuntimeController(
     internal var dv7ToDv81BridgeVersionForCurrentPlayback: String? = null
     internal var dv7ToDv81LastProbeReasonForCurrentPlayback: String? = null
     internal var playerInitializationStartedAtMs: Long = 0L
+    internal var media3PlaybackAwaitingValidation: Boolean = false
     internal var pendingSeekTelemetryRequestedAtMs: Long = 0L
     internal var pendingSeekTelemetryTargetMs: Long = -1L
     internal var currentScrobbleItem: TraktScrobbleItem? = null
@@ -255,6 +259,7 @@ class PlayerRuntimeController(
 
     fun onCleared() {
         releasePlayer()
+        vodTelemetryJob?.cancel()
         mediaSourceFactory.shutdown()
         sourceChipErrorDismissJob?.cancel()
     }

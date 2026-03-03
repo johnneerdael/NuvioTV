@@ -66,6 +66,7 @@ internal fun PlayerRuntimeController.initializePlayer(url: String, headers: Map<
         try {
             autoSubtitleSelected = false
             hasScannedTextTracksOnce = false
+            clearUnsupportedPlaybackOptions()
             resetLoadingOverlayForNewStream()
             playerInitializationStartedAtMs = System.currentTimeMillis()
             val playerSettings = playerSettingsDataStore.playerSettings.first()
@@ -356,7 +357,8 @@ internal fun PlayerRuntimeController.initializePlayer(url: String, headers: Map<
                         subtitleConfigurations = startupSubtitleConfigurations
                     )
                 )
-                playWhenReady = true
+                media3PlaybackAwaitingValidation = true
+                playWhenReady = false
                 prepare()
 
                 addListener(object : Player.Listener {
@@ -386,6 +388,9 @@ internal fun PlayerRuntimeController.initializePlayer(url: String, headers: Map<
                     
                         
                         if (playbackState == Player.STATE_READY) {
+                            if (media3PlaybackAwaitingValidation) {
+                                return
+                            }
                             if (pendingSeekTelemetryRequestedAtMs > 0L) {
                                 val latencyMs =
                                     (System.currentTimeMillis() - pendingSeekTelemetryRequestedAtMs)
@@ -528,53 +533,23 @@ internal fun PlayerRuntimeController.initializePlayer(url: String, headers: Map<
                         }
 
                         if (error.isAudioTrackInitializationFailure()) {
-                            if (!isSafeAudioModeActiveForCurrentPlayback) {
-                                Log.w(
-                                    PlayerRuntimeController.TAG,
-                                    "AudioTrack init failed, retrying with safe audio mode " +
-                                        "host=${currentStreamUrl.safeHost()} " +
-                                        "positionMs=$currentPosition"
-                                )
-                                safeAudioForcedStreamUrls.add(currentStreamUrl)
-                                retryCurrentStreamWithSafeAudioFallback(currentPosition)
-                                return
-                            }
-                            if (!isAudioDisabledForCurrentPlayback) {
-                                Log.w(
-                                    PlayerRuntimeController.TAG,
-                                    "AudioTrack init still failing in safe audio mode, retrying " +
-                                        "with audio disabled host=${currentStreamUrl.safeHost()} " +
-                                        "positionMs=$currentPosition"
-                                )
-                                audioDisabledForcedStreamUrls.add(currentStreamUrl)
-                                retryCurrentStreamWithAudioDisabled(currentPosition)
-                                return
-                            }
+                            showUnsupportedPlaybackOptions(
+                                reason = "audio-track-init-failed",
+                                detail = "positionMs=$currentPosition code=${error.errorCode}",
+                                title = "Audio output not supported in built-in player",
+                                message = "The built-in player could not initialize audio output for this stream. Open it in LibVLC or an external player instead."
+                            )
+                            return
                         }
 
                         if (error.isStuckPlayingNoProgress()) {
-                            if (!isSafeAudioModeActiveForCurrentPlayback) {
-                                Log.w(
-                                    PlayerRuntimeController.TAG,
-                                    "Stuck player detected, retrying with safe audio mode " +
-                                        "host=${currentStreamUrl.safeHost()} " +
-                                        "positionMs=$currentPosition"
-                                )
-                                safeAudioForcedStreamUrls.add(currentStreamUrl)
-                                retryCurrentStreamWithSafeAudioFallback(currentPosition)
-                                return
-                            }
-                            if (!isAudioDisabledForCurrentPlayback) {
-                                Log.w(
-                                    PlayerRuntimeController.TAG,
-                                    "Stuck player persists in safe audio mode, retrying with " +
-                                        "audio disabled host=${currentStreamUrl.safeHost()} " +
-                                        "positionMs=$currentPosition"
-                                )
-                                audioDisabledForcedStreamUrls.add(currentStreamUrl)
-                                retryCurrentStreamWithAudioDisabled(currentPosition)
-                                return
-                            }
+                            showUnsupportedPlaybackOptions(
+                                reason = "player-stuck-no-progress",
+                                detail = "positionMs=$currentPosition code=${error.errorCode}",
+                                title = "Built-in player could not render this stream",
+                                message = "The built-in player started but did not make playback progress reliably. Open this stream in LibVLC or an external player instead."
+                            )
+                            return
                         }
 
                         val timeoutError = error.findCause<SocketTimeoutException>()
