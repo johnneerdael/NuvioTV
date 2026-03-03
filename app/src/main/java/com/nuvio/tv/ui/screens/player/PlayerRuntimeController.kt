@@ -3,10 +3,12 @@ package com.nuvio.tv.ui.screens.player
 import android.app.Activity
 import android.content.Context
 import android.media.audiofx.LoudnessEnhancer
+import androidx.lifecycle.MutableLiveData
 import androidx.lifecycle.SavedStateHandle
 import androidx.media3.common.C
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.trackselection.DefaultTrackSelector
+import com.nuvio.tv.core.player.PlaybackBackendKind
 import com.nuvio.tv.core.plugin.PluginManager
 import com.nuvio.tv.data.local.NextEpisodeThresholdMode
 import com.nuvio.tv.data.local.PlayerSettingsDataStore
@@ -29,6 +31,12 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import org.videolan.libvlc.LibVLC
+import org.videolan.libvlc.RendererItem
+import org.videolan.libvlc.interfaces.IVLCVout
+import org.videolan.libvlc.util.DisplayManager
+import org.videolan.libvlc.util.VLCVideoLayout
+import org.videolan.libvlc.MediaPlayer as VlcMediaPlayer
 import java.lang.ref.WeakReference
 import java.util.concurrent.atomic.AtomicLong
 
@@ -133,6 +141,17 @@ class PlayerRuntimeController(
     internal var _exoPlayer: ExoPlayer? = null
     val exoPlayer: ExoPlayer?
         get() = _exoPlayer
+    internal var activePlaybackController: PlaybackBackendController? = null
+    internal var libVlc: LibVLC? = null
+    internal var libVlcPlayer: VlcMediaPlayer? = null
+    internal var libVlcVideoLayout: VLCVideoLayout? = null
+    internal var libVlcDisplayManager: DisplayManager? = null
+    internal var libVlcVoutCallback: IVLCVout.Callback? = null
+    internal var libVlcViewsAttached: Boolean = false
+    internal val libVlcRendererLiveData: MutableLiveData<RendererItem?> = MutableLiveData(null)
+    internal var pendingLibVlcAutoStart: Boolean = false
+    internal var pendingLibVlcSeekPositionMs: Long? = null
+    internal var immediateLibVlcHandoffRequestedForCurrentPlayback: Boolean = false
 
     internal var progressJob: Job? = null
     internal var firstFrameWatchdogJob: Job? = null
@@ -202,6 +221,10 @@ class PlayerRuntimeController(
     internal var hasRetriedCurrentStreamAfterUnexpectedNpe: Boolean = false
     internal var hasRetriedCurrentStreamAfterMediaPeriodHolderCrash: Boolean = false
     internal var timeoutRecoveryAttempts: Int = 0
+    internal var activePlaybackProxySessionId: String? = null
+    internal var activePlaybackProxyUrl: String? = null
+    internal var activePlaybackBackend: PlaybackBackendKind = PlaybackBackendKind.MEDIA3
+    internal var media3PlaybackAwaitingValidation: Boolean = false
     internal val dv7ToHevcForcedStreamUrls: MutableSet<String> = mutableSetOf()
     internal val vc1SoftwarePreferredStreamUrls: MutableSet<String> = mutableSetOf()
     internal val vc1TrackSelectionBypassStreamUrls: MutableSet<String> = mutableSetOf()
@@ -230,6 +253,9 @@ class PlayerRuntimeController(
     internal var currentVideoTrackHeight: Int = 0
     internal var currentVideoTrackSelected: Boolean = false
     internal var currentVideoTrackBestSupport: Int = C.FORMAT_UNSUPPORTED_TYPE
+    internal var currentAudioTrackMimeType: String? = null
+    internal var currentAudioTrackCodecs: String? = null
+    internal var currentAudioTrackChannelCount: Int = 0
     internal var lastLoggedVideoTrackSignature: String? = null
     internal var episodeStreamsJob: Job? = null
     internal var episodeStreamsCacheRequestKey: String? = null

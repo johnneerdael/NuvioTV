@@ -20,6 +20,7 @@ import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -91,6 +92,8 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.tv.material3.Card
 import androidx.tv.material3.CardDefaults
+import androidx.tv.material3.Button
+import androidx.tv.material3.ButtonDefaults
 import androidx.tv.material3.ExperimentalTvMaterial3Api
 import androidx.tv.material3.Icon
 import androidx.tv.material3.IconButton
@@ -102,6 +105,7 @@ import coil.decode.SvgDecoder
 import coil.request.ImageRequest
 import androidx.compose.ui.res.stringResource
 import com.nuvio.tv.R
+import com.nuvio.tv.core.player.PlaybackBackendKind
 import com.nuvio.tv.core.player.ExternalPlayerLauncher
 import com.nuvio.tv.ui.components.LoadingIndicator
 import com.nuvio.tv.ui.theme.NuvioColors
@@ -110,7 +114,7 @@ import java.util.Date
 import java.util.Locale
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.delay
-
+import org.videolan.libvlc.util.VLCVideoLayout
 @Composable
 fun PlayerScreen(
     viewModel: PlayerViewModel = hiltViewModel(),
@@ -140,6 +144,8 @@ fun PlayerScreen(
     val handleBackPress = {
         if (uiState.error != null) {
             exitPlayerFromError()
+        } else if (uiState.unsupportedPlayback != null) {
+            exitPlayer()
         } else if (uiState.showPauseOverlay) {
             viewModel.onEvent(PlayerEvent.OnDismissPauseOverlay)
         } else if (uiState.showMoreDialog) {
@@ -240,7 +246,12 @@ fun PlayerScreen(
         uiState.showAudioDialog,
         uiState.showSubtitleDialog,
         uiState.showSpeedDialog,
+        uiState.unsupportedPlayback,
+        uiState.playbackBackend,
     ) {
+        if (uiState.unsupportedPlayback != null || uiState.playbackBackend == PlaybackBackendKind.LIBVLC) {
+            return@LaunchedEffect
+        }
         if (uiState.showControls && !uiState.showEpisodesPanel && !uiState.showSourcesPanel &&
             !uiState.showAudioDialog && !uiState.showSubtitleDialog &&
             !uiState.showSubtitleStylePanel && !uiState.showSubtitleDelayOverlay &&
@@ -349,7 +360,8 @@ fun PlayerScreen(
                 val panelOrDialogOpen = uiState.showEpisodesPanel || uiState.showSourcesPanel ||
                         uiState.showAudioDialog || uiState.showSubtitleDialog ||
                         uiState.showSubtitleStylePanel || uiState.showSpeedDialog ||
-                        uiState.showSubtitleDelayOverlay || uiState.showMoreDialog
+                        uiState.showSubtitleDelayOverlay || uiState.showMoreDialog ||
+                        uiState.unsupportedPlayback != null
                 if (panelOrDialogOpen) return@onKeyEvent false
 
                 if (keyEvent.nativeKeyEvent.action == KeyEvent.ACTION_UP) {
@@ -460,7 +472,24 @@ fun PlayerScreen(
             }
     ) {
         // Video Player
-        viewModel.exoPlayer?.let { player ->
+        if (uiState.playbackBackend == PlaybackBackendKind.LIBVLC) {
+            AndroidView(
+                factory = { context ->
+                    VLCVideoLayout(context).apply {
+                        keepScreenOn = true
+                        viewModel.attachLibVlcVideoLayout(this)
+                    }
+                },
+                update = { videoLayout ->
+                    videoLayout.keepScreenOn = true
+                    viewModel.attachLibVlcVideoLayout(videoLayout)
+                },
+                onRelease = { videoLayout ->
+                    viewModel.detachLibVlcVideoLayout(videoLayout)
+                },
+                modifier = Modifier.fillMaxSize()
+            )
+        } else viewModel.exoPlayer?.let { player ->
             val subtitleStyle = uiState.subtitleStyle
             val resizeMode = uiState.resizeMode
             
@@ -553,7 +582,7 @@ fun PlayerScreen(
         )
 
         // Buffering indicator
-        if (uiState.isBuffering && !uiState.showLoadingOverlay) {
+        if (uiState.isBuffering && !uiState.showLoadingOverlay && uiState.unsupportedPlayback == null) {
             Box(
                 modifier = Modifier.fillMaxSize(),
                 contentAlignment = Alignment.Center
@@ -567,6 +596,15 @@ fun PlayerScreen(
             ErrorOverlay(
                 message = uiState.error!!,
                 onBack = exitPlayerFromError
+            )
+        }
+
+        uiState.unsupportedPlayback?.let { unsupportedPlayback ->
+            UnsupportedPlaybackOverlay(
+                info = unsupportedPlayback,
+                onOpenInLibVlc = { viewModel.onEvent(PlayerEvent.OnOpenUnsupportedInLibVlc) },
+                onOpenInExternalPlayer = { viewModel.onEvent(PlayerEvent.OnOpenUnsupportedInExternalPlayer) },
+                onBack = exitPlayer
             )
         }
 
@@ -1696,6 +1734,132 @@ private fun ErrorOverlay(
 }
 
 @Composable
+private fun UnsupportedPlaybackOverlay(
+    info: UnsupportedPlaybackInfo,
+    onOpenInLibVlc: () -> Unit,
+    onOpenInExternalPlayer: () -> Unit,
+    onBack: () -> Unit
+) {
+    val libVlcFocusRequester = remember { FocusRequester() }
+    val externalPlayerFocusRequester = remember { FocusRequester() }
+    val backFocusRequester = remember { FocusRequester() }
+
+    LaunchedEffect(info.canOpenInLibVlc, info.canOpenInExternalPlayer) {
+        kotlinx.coroutines.delay(50)
+        when {
+            info.canOpenInLibVlc -> libVlcFocusRequester.requestFocus()
+            info.canOpenInExternalPlayer -> externalPlayerFocusRequester.requestFocus()
+            else -> backFocusRequester.requestFocus()
+        }
+    }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black.copy(alpha = 0.92f))
+            .zIndex(3f),
+        contentAlignment = Alignment.Center
+    ) {
+        Column(
+            modifier = Modifier
+                .width(640.dp)
+                .clip(RoundedCornerShape(20.dp))
+                .background(
+                    Brush.verticalGradient(
+                        colors = listOf(
+                            Color(0xFF141414),
+                            Color(0xFF1C1C1C)
+                        )
+                    )
+                )
+                .padding(horizontal = 28.dp, vertical = 26.dp),
+            horizontalAlignment = Alignment.Start,
+            verticalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
+            Text(
+                text = info.title,
+                style = MaterialTheme.typography.headlineSmall,
+                color = Color.White
+            )
+
+            Text(
+                text = info.message,
+                style = MaterialTheme.typography.bodyLarge,
+                color = Color.White.copy(alpha = 0.78f)
+            )
+
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(14.dp)
+            ) {
+                if (info.canOpenInLibVlc) {
+                    UnsupportedOverlayButton(
+                        text = "Open in LibVLC",
+                        onClick = onOpenInLibVlc,
+                        modifier = Modifier
+                            .focusRequester(libVlcFocusRequester)
+                            .focusProperties {
+                                right = if (info.canOpenInExternalPlayer) {
+                                    externalPlayerFocusRequester
+                                } else {
+                                    backFocusRequester
+                                }
+                            }
+                    )
+                }
+
+                if (info.canOpenInExternalPlayer) {
+                    UnsupportedOverlayButton(
+                        text = "Open in External Player",
+                        onClick = onOpenInExternalPlayer,
+                        modifier = Modifier
+                            .focusRequester(externalPlayerFocusRequester)
+                            .focusProperties {
+                                left = if (info.canOpenInLibVlc) libVlcFocusRequester else backFocusRequester
+                                right = backFocusRequester
+                            }
+                    )
+                }
+
+                UnsupportedOverlayButton(
+                    text = "Back",
+                    onClick = onBack,
+                    modifier = Modifier
+                        .focusRequester(backFocusRequester)
+                        .focusProperties {
+                            left = when {
+                                info.canOpenInExternalPlayer -> externalPlayerFocusRequester
+                                info.canOpenInLibVlc -> libVlcFocusRequester
+                                else -> backFocusRequester
+                            }
+                        }
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun UnsupportedOverlayButton(
+    text: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Button(
+        onClick = onClick,
+        modifier = modifier,
+        colors = ButtonDefaults.colors(
+            containerColor = NuvioColors.BackgroundCard,
+            contentColor = NuvioColors.TextPrimary,
+            focusedContainerColor = NuvioColors.FocusBackground,
+            focusedContentColor = NuvioColors.Primary
+        ),
+        shape = ButtonDefaults.shape(RoundedCornerShape(12.dp))
+    ) {
+        Text(text = text)
+    }
+}
+
+@Composable
 private fun SpeedSelectionDialog(
     currentSpeed: Float,
     onSpeedSelected: (Float) -> Unit,
@@ -1859,17 +2023,35 @@ internal fun DialogButton(
 
     Card(
         onClick = onClick,
-        modifier = modifier.onFocusChanged { isFocused = it.isFocused },
+        modifier = modifier
+            .onFocusChanged { isFocused = it.isFocused }
+            .border(
+                width = if (isFocused) 2.dp else 1.dp,
+                color = when {
+                    isFocused -> Color.White
+                    isPrimary -> NuvioColors.Secondary.copy(alpha = 0.45f)
+                    else -> Color.White.copy(alpha = 0.12f)
+                },
+                shape = RoundedCornerShape(8.dp)
+            ),
         colors = CardDefaults.colors(
-            containerColor = if (isPrimary) NuvioColors.Secondary else NuvioColors.BackgroundCard,
-            focusedContainerColor = if (isPrimary) NuvioColors.Secondary else NuvioColors.FocusBackground
+            containerColor = if (isPrimary) {
+                NuvioColors.Secondary.copy(alpha = 0.18f)
+            } else {
+                NuvioColors.BackgroundCard
+            },
+            focusedContainerColor = NuvioColors.FocusBackground
         ),
         shape = CardDefaults.shape(shape = RoundedCornerShape(8.dp))
     ) {
         Text(
             text = text,
             style = MaterialTheme.typography.labelLarge,
-            color = if (isPrimary) NuvioColors.OnSecondary else NuvioColors.TextPrimary,
+            color = when {
+                isFocused -> NuvioColors.TextPrimary
+                isPrimary -> NuvioColors.Secondary
+                else -> NuvioColors.TextPrimary
+            },
             modifier = Modifier.padding(horizontal = 24.dp, vertical = 12.dp)
         )
     }

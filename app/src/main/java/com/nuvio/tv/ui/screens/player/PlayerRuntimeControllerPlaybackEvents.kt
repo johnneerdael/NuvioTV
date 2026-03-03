@@ -3,6 +3,8 @@ package com.nuvio.tv.ui.screens.player
 import android.util.Log
 import androidx.media3.common.Player
 import com.nuvio.tv.core.player.DoviBridge
+import com.nuvio.tv.core.player.ExternalPlayerLauncher
+import com.nuvio.tv.core.player.LibVlcPlayerLauncher
 import com.nuvio.tv.data.local.SubtitleStyleSettings
 import com.nuvio.tv.data.repository.TraktScrobbleItem
 import com.nuvio.tv.data.repository.extractYear
@@ -18,9 +20,9 @@ internal fun PlayerRuntimeController.startProgressUpdates() {
     progressJob?.cancel()
     progressJob = scope.launch {
         while (isActive) {
-            _exoPlayer?.let { player ->
-                val pos = player.currentPosition.coerceAtLeast(0L)
-                val playerDuration = player.duration
+            activeBackendController()?.let { backend ->
+                val pos = backend.currentPositionMs().coerceAtLeast(0L)
+                val playerDuration = backend.durationMs()
                 if (playerDuration > lastKnownDuration) {
                     lastKnownDuration = playerDuration
                 }
@@ -38,12 +40,12 @@ internal fun PlayerRuntimeController.startProgressUpdates() {
                 )
 
                 
-                if (player.isPlaying) {
+                if (backend.isPlaying()) {
                     val now = System.currentTimeMillis()
                     if (now - lastBufferLogTimeMs >= 10_000) {
                         lastBufferLogTimeMs = now
-                        val bufAhead = (player.bufferedPosition - player.currentPosition) / 1000
-                        val loading = player.isLoading
+                        val bufAhead = (backend.bufferedPositionMs() - backend.currentPositionMs()) / 1000
+                        val loading = backend.isLoading()
                         val runtime = Runtime.getRuntime()
                         val usedMb = (runtime.totalMemory() - runtime.freeMemory()) / (1024 * 1024)
                         val maxMb = runtime.maxMemory() / (1024 * 1024)
@@ -99,7 +101,8 @@ internal fun PlayerRuntimeController.stopWatchProgressSaving() {
 }
 
 internal fun PlayerRuntimeController.saveWatchProgressIfNeeded() {
-    val currentPosition = _exoPlayer?.currentPosition ?: return
+    val currentPosition = activeCurrentPositionMs()
+    if (currentPosition <= 0L && activePlaybackBackend != com.nuvio.tv.core.player.PlaybackBackendKind.LIBVLC) return
     val duration = getEffectiveDuration(currentPosition)
     
     
@@ -110,13 +113,14 @@ internal fun PlayerRuntimeController.saveWatchProgressIfNeeded() {
 }
 
 internal fun PlayerRuntimeController.saveWatchProgress() {
-    val currentPosition = _exoPlayer?.currentPosition ?: return
+    val currentPosition = activeCurrentPositionMs()
+    if (currentPosition <= 0L && activePlaybackBackend != com.nuvio.tv.core.player.PlaybackBackendKind.LIBVLC) return
     val duration = getEffectiveDuration(currentPosition)
     saveWatchProgressInternal(currentPosition, duration)
 }
 
 internal fun PlayerRuntimeController.getEffectiveDuration(position: Long): Long {
-    val playerDuration = _exoPlayer?.duration ?: 0L
+    val playerDuration = activeDurationMs()
     val effectiveDuration = maxOf(playerDuration, lastKnownDuration)
     if (effectiveDuration <= 0L) return 0L
 
@@ -157,10 +161,10 @@ internal fun PlayerRuntimeController.saveWatchProgressInternal(position: Long, d
 }
 
 internal fun PlayerRuntimeController.currentPlaybackProgressPercent(): Float {
-    val player = _exoPlayer ?: return 0f
-    val duration = player.duration.takeIf { it > 0 } ?: lastKnownDuration
+    val position = activeCurrentPositionMs()
+    val duration = activeDurationMs().takeIf { it > 0 } ?: lastKnownDuration
     if (duration <= 0L) return 0f
-    return ((player.currentPosition.toFloat() / duration.toFloat()) * 100f).coerceIn(0f, 100f)
+    return ((position.toFloat() / duration.toFloat()) * 100f).coerceIn(0f, 100f)
 }
 
 internal fun PlayerRuntimeController.refreshScrobbleItem() {
@@ -264,7 +268,7 @@ internal fun PlayerRuntimeController.scheduleProgressSyncAfterSeek() {
         val progressPercent = currentPlaybackProgressPercent()
         emitPauseScrobbleStop(progressPercent = progressPercent)
 
-        if (_exoPlayer?.isPlaying == true && progressPercent >= 1f && progressPercent < 80f) {
+        if (activeIsPlaying() && progressPercent >= 1f && progressPercent < 80f) {
             emitScrobbleStart()
         }
     }
@@ -376,15 +380,16 @@ fun PlayerRuntimeController.onEvent(event: PlayerEvent) {
     onUserInteraction()
     when (event) {
         PlayerEvent.OnPlayPause -> {
-            _exoPlayer?.let { player ->
-                if (player.isPlaying) {
+            val backend = activeBackendController()
+            if (backend != null) {
+                if (backend.isPlaying()) {
                     userPausedManually = true
-                    player.pause()
+                    backend.pause()
                     schedulePauseOverlay()
                 } else {
                     userPausedManually = false
                     cancelPauseOverlay()
-                    player.play()
+                    backend.play()
                 }
             }
             showControlsTemporarily()
@@ -397,14 +402,14 @@ fun PlayerRuntimeController.onEvent(event: PlayerEvent) {
         }
         is PlayerEvent.OnSeekBy -> {
             pendingPreviewSeekPosition = null
-            _exoPlayer?.let { player ->
-                val maxDuration = player.duration.takeIf { it >= 0 } ?: Long.MAX_VALUE
-                val target = (player.currentPosition + event.deltaMs)
+            activeBackendController()?.let { backend ->
+                val maxDuration = backend.durationMs().takeIf { it >= 0 } ?: Long.MAX_VALUE
+                val target = (backend.currentPositionMs() + event.deltaMs)
                     .coerceAtLeast(0L)
                     .coerceAtMost(maxDuration)
                 pendingSeekTelemetryRequestedAtMs = System.currentTimeMillis()
                 pendingSeekTelemetryTargetMs = target
-                player.seekTo(target)
+                backend.seekTo(target)
                 _uiState.update { it.copy(currentPosition = target) }
                 scheduleProgressSyncAfterSeek()
             }
@@ -415,9 +420,9 @@ fun PlayerRuntimeController.onEvent(event: PlayerEvent) {
             }
         }
         is PlayerEvent.OnPreviewSeekBy -> {
-            _exoPlayer?.let { player ->
-                val maxDuration = player.duration.takeIf { it >= 0 } ?: Long.MAX_VALUE
-                val basePosition = pendingPreviewSeekPosition ?: player.currentPosition.coerceAtLeast(0L)
+            activeBackendController()?.let { backend ->
+                val maxDuration = backend.durationMs().takeIf { it >= 0 } ?: Long.MAX_VALUE
+                val basePosition = pendingPreviewSeekPosition ?: backend.currentPositionMs().coerceAtLeast(0L)
                 val target = (basePosition + event.deltaMs)
                     .coerceAtLeast(0L)
                     .coerceAtMost(maxDuration)
@@ -435,7 +440,7 @@ fun PlayerRuntimeController.onEvent(event: PlayerEvent) {
             if (target != null) {
                 pendingSeekTelemetryRequestedAtMs = System.currentTimeMillis()
                 pendingSeekTelemetryTargetMs = target
-                _exoPlayer?.seekTo(target)
+                activeSeekTo(target)
                 _uiState.update { it.copy(currentPosition = target) }
                 pendingPreviewSeekPosition = null
                 scheduleProgressSyncAfterSeek()
@@ -450,7 +455,7 @@ fun PlayerRuntimeController.onEvent(event: PlayerEvent) {
             pendingPreviewSeekPosition = null
             pendingSeekTelemetryRequestedAtMs = System.currentTimeMillis()
             pendingSeekTelemetryTargetMs = event.position
-            _exoPlayer?.seekTo(event.position)
+            activeSeekTo(event.position)
             _uiState.update { it.copy(currentPosition = event.position) }
             scheduleProgressSyncAfterSeek()
             if (_uiState.value.showControls) {
@@ -506,7 +511,7 @@ fun PlayerRuntimeController.onEvent(event: PlayerEvent) {
             }
         }
         is PlayerEvent.OnSetPlaybackSpeed -> {
-            _exoPlayer?.setPlaybackSpeed(event.speed)
+            activeSetPlaybackSpeed(event.speed)
             _uiState.update { 
                 it.copy(
                     playbackSpeed = event.speed,
@@ -642,6 +647,32 @@ fun PlayerRuntimeController.onEvent(event: PlayerEvent) {
         is PlayerEvent.OnSourceStreamSelected -> {
             switchToSourceStream(event.stream)
         }
+        PlayerEvent.OnOpenUnsupportedInLibVlc -> {
+            val proxyUrl = rebindPlaybackProxySessionForBackend(
+                backend = com.nuvio.tv.core.player.PlaybackBackendKind.LIBVLC,
+                directPassthrough = true
+            ) ?: activePlaybackProxyUrl
+            val launched = !proxyUrl.isNullOrBlank() && LibVlcPlayerLauncher.launch(
+                context = currentHostActivity() ?: context,
+                proxyUrl = proxyUrl,
+                streamUrl = currentStreamUrl,
+                title = _uiState.value.currentStreamName ?: title
+            )
+            if (launched) {
+                releaseCurrentMedia3BackendOnly()
+            }
+        }
+        PlayerEvent.OnOpenUnsupportedInExternalPlayer -> {
+            val launched = ExternalPlayerLauncher.launch(
+                context = context,
+                url = currentStreamUrl,
+                title = _uiState.value.currentStreamName ?: title,
+                headers = currentHeaders
+            )
+            if (launched) {
+                releasePlayer()
+            }
+        }
         PlayerEvent.OnDismissDialog -> {
             _uiState.update { 
                 it.copy(
@@ -665,7 +696,8 @@ fun PlayerRuntimeController.onEvent(event: PlayerEvent) {
                 state.copy(
                     error = null,
                     showLoadingOverlay = state.loadingOverlayEnabled,
-                    showSubtitleDelayOverlay = false
+                    showSubtitleDelayOverlay = false,
+                    unsupportedPlayback = null
                 )
             }
             releasePlayer()
@@ -690,13 +722,13 @@ fun PlayerRuntimeController.onEvent(event: PlayerEvent) {
         }
         PlayerEvent.OnSkipIntro -> {
             _uiState.value.activeSkipInterval?.let { interval ->
-                val duration = _exoPlayer?.duration?.takeIf { it > 0 } ?: Long.MAX_VALUE
+                val duration = activeDurationMs().takeIf { it > 0 } ?: Long.MAX_VALUE
                 val target = if (interval.endTime == Double.MAX_VALUE) duration
                 else (interval.endTime * 1000).toLong()
                 val seekMs = target.coerceAtMost(duration)
                 pendingSeekTelemetryRequestedAtMs = System.currentTimeMillis()
                 pendingSeekTelemetryTargetMs = seekMs
-                _exoPlayer?.seekTo(seekMs)
+                activeSeekTo(seekMs)
                 scheduleProgressSyncAfterSeek()
                 _uiState.update { it.copy(activeSkipInterval = null, skipIntervalDismissed = true) }
             }

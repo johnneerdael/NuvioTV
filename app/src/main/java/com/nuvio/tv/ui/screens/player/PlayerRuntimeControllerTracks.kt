@@ -17,6 +17,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.yield
 import java.util.Locale
 
 internal fun PlayerRuntimeController.updateAvailableTracks(tracks: Tracks) {
@@ -74,7 +75,12 @@ internal fun PlayerRuntimeController.updateAvailableTracks(tracks: Tracks) {
                 for (i in 0 until trackGroup.length) {
                     val format = trackGroup.getTrackFormat(i)
                     val isSelected = trackGroup.isTrackSelected(i)
-                    if (isSelected) selectedAudioIndex = audioTracks.size
+                    if (isSelected) {
+                        selectedAudioIndex = audioTracks.size
+                        currentAudioTrackMimeType = format.sampleMimeType
+                        currentAudioTrackCodecs = format.codecs
+                        currentAudioTrackChannelCount = format.channelCount.coerceAtLeast(0)
+                    }
 
                     
                     val codecName = CustomDefaultTrackNameProvider.formatNameFromMime(format.sampleMimeType)
@@ -178,20 +184,38 @@ internal fun PlayerRuntimeController.updateAvailableTracks(tracks: Tracks) {
                     "vc1TrackBypassActive=$isVc1TrackSelectionBypassActiveForCurrentPlayback"
             )
         }
-        if (currentVideoTrackIsLikelyVc1 &&
-            !currentVideoTrackSelected &&
-            isVc1SoftwareFallbackActiveForCurrentPlayback &&
-            !isVc1TrackSelectionBypassActiveForCurrentPlayback
+        val signatureKnownUnsupported = hasRememberedMedia3UnsupportedSignature(videoTrackSignature)
+        val capabilityKey = buildDecoderCapabilityKey(
+            sampleMimeType = currentVideoTrackMimeType,
+            codecs = currentVideoTrackCodecs,
+            isLikelyVc1 = currentVideoTrackIsLikelyVc1
+        )
+        val capabilityKnownUnsupported = hasRememberedMedia3UnsupportedCapability(capabilityKey)
+        val hardUnsupportedVideo =
+            currentVideoTrackBestSupport == C.FORMAT_UNSUPPORTED_SUBTYPE ||
+                currentVideoTrackBestSupport == C.FORMAT_UNSUPPORTED_TYPE
+        if (!currentVideoTrackSelected &&
+            (hardUnsupportedVideo || signatureKnownUnsupported || capabilityKnownUnsupported) &&
+            activePlaybackBackend == com.nuvio.tv.core.player.PlaybackBackendKind.MEDIA3 &&
+            !immediateLibVlcHandoffRequestedForCurrentPlayback
         ) {
+            rememberCurrentStreamAsMedia3Unsupported()
+            rememberCurrentDecoderSignatureAsUnsupported(videoTrackSignature)
+            rememberCurrentDecoderCapabilityAsUnsupported(capabilityKey)
+            cancelFirstFrameWatchdog()
             val currentPosition = _exoPlayer?.currentPosition ?: 0L
-            vc1TrackSelectionBypassStreamUrls.add(currentStreamUrl)
             Log.w(
                 PlayerRuntimeController.TAG,
-                    "VIDEO_TRACK: VC-1 track present but unselected after software-preferred retry, " +
-                        "forcing track-selection bypass support=${Util.getFormatSupportString(currentVideoTrackBestSupport)} " +
+                "VIDEO_TRACK: unsupported video track, blocking Media3 playback " +
+                    "support=${Util.getFormatSupportString(currentVideoTrackBestSupport)} " +
+                    "remembered=$signatureKnownUnsupported " +
+                    "capabilityRemembered=$capabilityKnownUnsupported " +
                     "host=${Uri.parse(currentStreamUrl).host ?: "unknown"} positionMs=$currentPosition"
             )
-            retryCurrentStreamWithVc1TrackSelectionBypass(currentPosition)
+            showUnsupportedPlaybackOptions(
+                reason = "unsupported-video-track",
+                detail = "support=${Util.getFormatSupportString(currentVideoTrackBestSupport)}"
+            )
             return
         }
     } else {
@@ -203,6 +227,11 @@ internal fun PlayerRuntimeController.updateAvailableTracks(tracks: Tracks) {
         currentVideoTrackBestSupport = C.FORMAT_UNSUPPORTED_TYPE
         currentVideoTrackIsLikelyVc1 = false
         lastLoggedVideoTrackSignature = null
+    }
+    if (selectedAudioIndex < 0) {
+        currentAudioTrackMimeType = null
+        currentAudioTrackCodecs = null
+        currentAudioTrackChannelCount = 0
     }
 
     hasScannedTextTracksOnce = true
@@ -250,6 +279,26 @@ internal fun PlayerRuntimeController.updateAvailableTracks(tracks: Tracks) {
         selectedAudioIndex = restoredIndex
     }
 
+    val selectedAudioCapabilityKey = buildAudioCapabilityKey(
+        sampleMimeType = currentAudioTrackMimeType,
+        codecs = currentAudioTrackCodecs,
+        channelCount = currentAudioTrackChannelCount
+    )
+    if (selectedAudioIndex >= 0 &&
+        hasRememberedMedia3UnsupportedCapability(selectedAudioCapabilityKey) &&
+        activePlaybackBackend == com.nuvio.tv.core.player.PlaybackBackendKind.MEDIA3 &&
+        _uiState.value.unsupportedPlayback == null
+    ) {
+        cancelFirstFrameWatchdog()
+        showUnsupportedPlaybackOptions(
+            reason = "unsupported-audio-track",
+            detail = "audio=${selectedAudioCapabilityKey ?: "unknown"}",
+            title = "Audio output not supported in built-in player",
+            message = "This stream uses an audio format/output combination that previously failed in the built-in player. Open it in LibVLC or an external player instead."
+        )
+        return
+    }
+
     _uiState.update {
         it.copy(
             audioTracks = audioTracks,
@@ -257,6 +306,9 @@ internal fun PlayerRuntimeController.updateAvailableTracks(tracks: Tracks) {
             selectedAudioTrackIndex = selectedAudioIndex,
             selectedSubtitleTrackIndex = selectedSubtitleIndex
         )
+    }
+    if (hasVideoTrack || audioTracks.isNotEmpty() || subtitleTracks.isNotEmpty()) {
+        maybeAllowValidatedMedia3Playback()
     }
     if (currentStreamHasVideoTrack) {
         maybeScheduleFirstFrameWatchdog()
@@ -278,6 +330,36 @@ private fun isLikelyVc1VideoFormat(
         haystack.contains("vc-1") ||
         haystack.contains("vc1") ||
         haystack.contains("wmv3")
+}
+
+private fun buildDecoderCapabilityKey(
+    sampleMimeType: String?,
+    codecs: String?,
+    isLikelyVc1: Boolean
+): String? {
+    val mime = sampleMimeType?.lowercase(Locale.ROOT)?.takeIf { it.isNotBlank() } ?: return null
+    val codecFamily = codecs
+        ?.substringBefore('.')
+        ?.substringBefore(',')
+        ?.lowercase(Locale.ROOT)
+        ?.takeIf { it.isNotBlank() }
+        ?: if (isLikelyVc1) "vc1" else "unknown"
+    return "$mime|$codecFamily"
+}
+
+internal fun buildAudioCapabilityKey(
+    sampleMimeType: String?,
+    codecs: String?,
+    channelCount: Int
+): String? {
+    val mime = sampleMimeType?.lowercase(Locale.ROOT)?.takeIf { it.isNotBlank() } ?: return null
+    val codecFamily = codecs
+        ?.substringBefore('.')
+        ?.substringBefore(',')
+        ?.lowercase(Locale.ROOT)
+        ?.takeIf { it.isNotBlank() }
+        ?: "unknown"
+    return "$mime|$codecFamily|ch=${channelCount.coerceAtLeast(0)}"
 }
 
 private fun formatSupportRank(@C.FormatSupport formatSupport: Int): Int {

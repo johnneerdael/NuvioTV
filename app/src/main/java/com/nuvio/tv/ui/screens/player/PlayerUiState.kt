@@ -3,6 +3,7 @@ package com.nuvio.tv.ui.screens.player
 import androidx.media3.common.C
 import androidx.media3.common.TrackGroup
 import androidx.media3.ui.AspectRatioFrameLayout
+import com.nuvio.tv.core.player.PlaybackBackendKind
 import com.nuvio.tv.data.local.FrameRateMatchingMode
 import com.nuvio.tv.data.local.SubtitleOrganizationMode
 import com.nuvio.tv.data.local.SubtitleStyleSettings
@@ -121,7 +122,16 @@ data class PlayerUiState(
     // Aspect ratio / resize mode
     val resizeMode: Int = AspectRatioFrameLayout.RESIZE_MODE_FIT,
     val showAspectRatioIndicator: Boolean = false,
-    val aspectRatioIndicatorText: String = ""
+    val aspectRatioIndicatorText: String = "",
+    val playbackBackend: PlaybackBackendKind = PlaybackBackendKind.MEDIA3,
+    val unsupportedPlayback: UnsupportedPlaybackInfo? = null
+)
+
+data class UnsupportedPlaybackInfo(
+    val title: String,
+    val message: String,
+    val canOpenInLibVlc: Boolean = false,
+    val canOpenInExternalPlayer: Boolean = true
 )
 
 data class TrackInfo(
@@ -184,6 +194,8 @@ sealed class PlayerEvent {
     data object OnReloadSourceStreams : PlayerEvent()
     data class OnSourceAddonFilterSelected(val addonName: String?) : PlayerEvent()
     data class OnSourceStreamSelected(val stream: Stream) : PlayerEvent()
+    data object OnOpenUnsupportedInLibVlc : PlayerEvent()
+    data object OnOpenUnsupportedInExternalPlayer : PlayerEvent()
     data object OnDismissDialog : PlayerEvent()
     data object OnRetry : PlayerEvent()
     data object OnParentalGuideHide : PlayerEvent()

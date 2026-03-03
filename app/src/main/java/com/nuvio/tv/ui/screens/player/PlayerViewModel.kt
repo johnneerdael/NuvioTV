@@ -18,6 +18,7 @@ import com.nuvio.tv.domain.repository.WatchProgressRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.StateFlow
+import org.videolan.libvlc.util.VLCVideoLayout
 import javax.inject.Inject
 
 @HiltViewModel
@@ -90,6 +91,14 @@ class PlayerViewModel @Inject constructor(
 
     fun startInitialPlaybackIfNeeded() {
         controller.startInitialPlaybackIfNeeded()
+    }
+
+    fun attachLibVlcVideoLayout(videoLayout: VLCVideoLayout) {
+        controller.attachLibVlcVideoLayout(videoLayout)
+    }
+
+    fun detachLibVlcVideoLayout(videoLayout: VLCVideoLayout?) {
+        controller.detachLibVlcVideoLayout(videoLayout)
     }
 
     fun onEvent(event: PlayerEvent) {

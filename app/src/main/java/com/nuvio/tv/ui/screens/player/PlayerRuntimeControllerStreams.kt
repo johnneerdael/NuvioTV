@@ -325,9 +325,11 @@ internal fun PlayerRuntimeController.switchToSourceStream(stream: Stream) {
                     headers = newHeaders,
                     frameRateMatchingMode = playerSettings.frameRateMatchingMode
                 )
-                player.setMediaSource(mediaSourceFactory.createMediaSource(url, newHeaders))
-                player.playWhenReady = true
-                player.prepare()
+                val playbackRoute = preparePlaybackRoute(url, newHeaders)
+                startPlaybackRouteOnActivePlayer(
+                    player = player,
+                    playbackRoute = playbackRoute
+                )
             } catch (e: Exception) {
                 _uiState.update { it.copy(error = e.message ?: "Failed to play selected stream") }
             }
@@ -649,9 +651,11 @@ internal fun PlayerRuntimeController.switchToEpisodeStream(stream: Stream, force
                     headers = newHeaders,
                     frameRateMatchingMode = playerSettings.frameRateMatchingMode
                 )
-                player.setMediaSource(mediaSourceFactory.createMediaSource(url, newHeaders))
-                player.playWhenReady = true
-                player.prepare()
+                val playbackRoute = preparePlaybackRoute(url, newHeaders)
+                startPlaybackRouteOnActivePlayer(
+                    player = player,
+                    playbackRoute = playbackRoute
+                )
             } catch (e: Exception) {
                 _uiState.update { it.copy(error = e.message ?: "Failed to play selected stream") }
             }

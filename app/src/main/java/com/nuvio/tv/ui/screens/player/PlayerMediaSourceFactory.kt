@@ -20,6 +20,7 @@ import androidx.media3.exoplayer.upstream.DefaultLoadErrorHandlingPolicy
 import androidx.media3.exoplayer.upstream.LoadErrorHandlingPolicy
 import com.nuvio.tv.data.local.PlayerSettings
 import com.nuvio.tv.data.local.VodCacheSizeMode
+import com.nuvio.tv.core.server.PlaybackProxyServer
 import okhttp3.ConnectionPool
 import okhttp3.Dispatcher
 import okhttp3.OkHttpClient
@@ -75,7 +76,8 @@ internal class PlayerMediaSourceFactory(private val context: Context) {
         }
 
         val mediaItem = mediaItemBuilder.build()
-        val progressiveUpstreamFactory: DataSource.Factory = if (useParallelConnections && !isHls && !isDash) {
+        val isPlaybackProxyUrl = PlaybackProxyServer.isPlaybackProxyUrl(url)
+        val progressiveUpstreamFactory: DataSource.Factory = if (useParallelConnections && !isHls && !isDash && !isPlaybackProxyUrl) {
             ParallelRangeDataSource.Factory(
                 okHttpFactory,
                 parallelConnectionCount,
@@ -84,7 +86,11 @@ internal class PlayerMediaSourceFactory(private val context: Context) {
         } else {
             okHttpFactory
         }
-        val useVodCache = ENABLE_VOD_CACHE && !isHls && !isDash && shouldUseVodCache(url)
+        val useVodCache = ENABLE_VOD_CACHE &&
+            !isHls &&
+            !isDash &&
+            !isPlaybackProxyUrl &&
+            shouldUseVodCache(url)
         currentVodCacheUrl = url
         currentVodCacheActive = false
         val vodCacheMaxBytes = resolveVodCacheMaxBytes(context)
@@ -185,6 +191,7 @@ internal class PlayerMediaSourceFactory(private val context: Context) {
 
     fun getVodCacheLogState(currentStreamUrl: String? = null): String {
         if (!ENABLE_VOD_CACHE) return "vod=off"
+        PlaybackProxyServer.getProxyCacheLogState(currentStreamUrl)?.let { return it }
         if (isVodCacheDisabled) return "vod=disabled"
 
         val usedBytes = runCatching { getAnySimpleCache()?.cacheSpace ?: 0L }.getOrDefault(0L)

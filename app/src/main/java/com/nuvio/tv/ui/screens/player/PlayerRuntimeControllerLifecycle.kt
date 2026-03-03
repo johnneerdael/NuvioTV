@@ -21,6 +21,8 @@ internal fun PlayerRuntimeController.releasePlayer() {
         e.printStackTrace()
     }
     progressJob?.cancel()
+    firstFrameWatchdogJob?.cancel()
+    firstFrameWatchdogJob = null
     hideControlsJob?.cancel()
     watchProgressSaveJob?.cancel()
     seekProgressSyncJob?.cancel()
@@ -29,8 +31,10 @@ internal fun PlayerRuntimeController.releasePlayer() {
     hideSubtitleDelayOverlayJob?.cancel()
     nextEpisodeAutoPlayJob?.cancel()
     nextEpisodeAutoPlayJob = null
-    _exoPlayer?.release()
-    _exoPlayer = null
+    releaseCurrentMedia3BackendOnly()
+    releaseLibVlcBackendOnly()
+    activePlaybackController = null
+    releasePlaybackProxySession()
 }
 
 internal fun PlayerRuntimeController.notifyAudioSessionUpdate(active: Boolean) {

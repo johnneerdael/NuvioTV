@@ -297,6 +297,7 @@ dependencies {
     implementation("io.github.peerless2012:ass-media:0.4.0-beta01")
     implementation("io.github.anilbeesetti:nextlib-mediainfo:1.9.1-0.11.0")
     implementation("io.github.anilbeesetti:nextlib-media3ext:1.9.1-0.11.0")
+    implementation(libs.videolan.libvlc)
     implementation("dev.chrisbanes.haze:haze-android:0.7.3") {
         exclude(group = "org.jetbrains.compose.ui")
         exclude(group = "org.jetbrains.compose.foundation")

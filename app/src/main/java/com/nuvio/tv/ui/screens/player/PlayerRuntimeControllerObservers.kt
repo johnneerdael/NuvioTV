@@ -372,9 +372,15 @@ internal fun PlayerRuntimeController.cancelFirstFrameWatchdog() {
 }
 
 internal fun PlayerRuntimeController.maybeScheduleFirstFrameWatchdog() {
+    if (activePlaybackBackend != com.nuvio.tv.core.player.PlaybackBackendKind.MEDIA3) return
+    if (media3PlaybackAwaitingValidation) return
+    if (_uiState.value.unsupportedPlayback != null) return
+    if (immediateLibVlcHandoffRequestedForCurrentPlayback) return
     if (hasRenderedFirstFrame || !currentStreamHasVideoTrack) return
     val player = _exoPlayer ?: return
-    if (player.playbackState != Player.STATE_READY || !player.playWhenReady) return
+    val stateAllowsWatchdog =
+        player.playbackState == Player.STATE_READY || player.playbackState == Player.STATE_BUFFERING
+    if (!stateAllowsWatchdog || !player.playWhenReady) return
     if (firstFrameWatchdogJob?.isActive == true) return
 
     firstFrameWatchdogJob = scope.launch {
@@ -382,7 +388,9 @@ internal fun PlayerRuntimeController.maybeScheduleFirstFrameWatchdog() {
 
         val livePlayer = _exoPlayer ?: return@launch
         if (hasRenderedFirstFrame) return@launch
-        if (livePlayer.playbackState != Player.STATE_READY || !livePlayer.playWhenReady) return@launch
+        val liveStateAllowsWatchdog =
+            livePlayer.playbackState == Player.STATE_READY || livePlayer.playbackState == Player.STATE_BUFFERING
+        if (!liveStateAllowsWatchdog || !livePlayer.playWhenReady) return@launch
 
         val currentPosition = livePlayer.currentPosition
         Log.w(
@@ -396,34 +404,26 @@ internal fun PlayerRuntimeController.maybeScheduleFirstFrameWatchdog() {
                 "bestSupport=${Util.getFormatSupportString(currentVideoTrackBestSupport)} " +
                 "vc1FallbackActive=$isVc1SoftwareFallbackActiveForCurrentPlayback " +
                 "vc1TrackBypassActive=$isVc1TrackSelectionBypassActiveForCurrentPlayback " +
+                "playbackState=${livePlayer.playbackState} " +
                 "positionMs=$currentPosition " +
                 "host=${Uri.parse(currentStreamUrl).host ?: "unknown"}"
         )
 
-        if (currentVideoTrackIsLikelyVc1 && !isVc1SoftwareFallbackActiveForCurrentPlayback) {
-            vc1SoftwarePreferredStreamUrls.add(currentStreamUrl)
-            Log.w(
-                PlayerRuntimeController.TAG,
-                "VIDEO_TIMEOUT: retrying with VC-1 software-preferred decoder path " +
-                    "host=${Uri.parse(currentStreamUrl).host ?: "unknown"} positionMs=$currentPosition"
+        val hardUnsupportedVideo =
+            currentVideoTrackBestSupport == C.FORMAT_UNSUPPORTED_SUBTYPE ||
+                currentVideoTrackBestSupport == C.FORMAT_UNSUPPORTED_TYPE
+        if (!currentVideoTrackSelected && hardUnsupportedVideo) {
+            showUnsupportedPlaybackOptions(
+                reason = "unsupported-video-timeout",
+                detail = "support=${Util.getFormatSupportString(currentVideoTrackBestSupport)}"
             )
-            retryCurrentStreamWithVc1SoftwareFallback(currentPosition)
             return@launch
         }
 
-        if (currentVideoTrackIsLikelyVc1 &&
-            !currentVideoTrackSelected &&
-            isVc1SoftwareFallbackActiveForCurrentPlayback &&
-            !isVc1TrackSelectionBypassActiveForCurrentPlayback
-        ) {
-            vc1TrackSelectionBypassStreamUrls.add(currentStreamUrl)
-            Log.w(
-                PlayerRuntimeController.TAG,
-                "VIDEO_TIMEOUT: retrying with VC-1 track-selection bypass " +
-                    "host=${Uri.parse(currentStreamUrl).host ?: "unknown"} positionMs=$currentPosition"
-            )
-            retryCurrentStreamWithVc1TrackSelectionBypass(currentPosition)
-        }
+        showUnsupportedPlaybackOptions(
+            reason = "no-first-frame",
+            detail = "mime=${currentVideoTrackMimeType ?: "unknown"} support=${Util.getFormatSupportString(currentVideoTrackBestSupport)} positionMs=$currentPosition"
+        )
     }
 }
 
@@ -431,6 +431,14 @@ private fun PlayerRuntimeController.scheduleDeferredPlayerReinitialize(
     fromPositionMs: Long,
     clearResumeProgress: Boolean = false
 ) {
+    if (immediateLibVlcHandoffRequestedForCurrentPlayback && !activePlaybackProxyUrl.isNullOrBlank()) {
+        Log.w(
+            PlayerRuntimeController.TAG,
+            "Skipping Media3 reinitialize because LibVLC handoff is already pending " +
+                "host=${Uri.parse(currentStreamUrl).host ?: "unknown"}"
+        )
+        return
+    }
     cancelFirstFrameWatchdog()
     if (clearResumeProgress) {
         pendingResumeProgress = null

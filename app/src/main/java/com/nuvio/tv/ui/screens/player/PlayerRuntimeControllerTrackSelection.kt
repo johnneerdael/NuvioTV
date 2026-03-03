@@ -247,11 +247,11 @@ internal fun PlayerRuntimeController.selectAddonSubtitle(subtitle: Subtitle) {
 
         val currentPosition = player.currentPosition
         val playWhenReady = player.playWhenReady
-
+        val playbackRoute = preparePlaybackRoute(currentStreamUrl, currentHeaders)
         player.setMediaSource(
             mediaSourceFactory.createMediaSource(
-                url = currentStreamUrl,
-                headers = currentHeaders,
+                url = playbackRoute.media3Url,
+                headers = playbackRoute.media3Headers,
                 subtitleConfigurations = subtitleConfigurations
             ),
             currentPosition
