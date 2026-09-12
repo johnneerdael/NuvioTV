@@ -1,7 +1,14 @@
 package com.nuvio.tv.ui.screens.home
 
-import android.view.KeyEvent as AndroidKeyEvent
+import com.nuvio.tv.ui.theme.NuvioTheme
+
+import androidx.activity.compose.BackHandler
+import androidx.compose.runtime.State
+import androidx.compose.foundation.lazy.grid.items
+import com.nuvio.tv.LocalContentFocusRequester
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.BorderStroke
@@ -9,6 +16,7 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
@@ -25,16 +33,28 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
+import kotlinx.coroutines.delay
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.focusRestorer
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.ExperimentalComposeUiApi
+import com.nuvio.tv.ui.util.asStable
+import com.nuvio.tv.ui.util.dpadRepeatThrottle
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.nuvio.tv.R
 import androidx.tv.material3.Border
@@ -44,23 +64,36 @@ import androidx.tv.material3.Text
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.tv.material3.Card
 import androidx.tv.material3.CardDefaults
 import androidx.tv.material3.Icon
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.sp
+import coil3.compose.AsyncImage
+import com.nuvio.tv.domain.model.CollectionFolder
+import com.nuvio.tv.domain.model.CardDepthSurface
 import com.nuvio.tv.domain.model.MetaPreview
+import com.nuvio.tv.domain.model.catalogRowStableKey
+import com.nuvio.tv.domain.model.PosterShape
 import com.nuvio.tv.ui.components.GridContentCard
+import com.nuvio.tv.ui.components.LocalCardDepthStyle
 import com.nuvio.tv.ui.components.GridContinueWatchingSection
+import com.nuvio.tv.domain.model.ContinueWatchingCardStyle
 import com.nuvio.tv.ui.components.HeroCarousel
+import com.nuvio.tv.ui.components.LoadingIndicator
+import com.nuvio.tv.ui.components.LocalStartupSplashEnabled
 import com.nuvio.tv.ui.components.PosterCardDefaults
 import com.nuvio.tv.ui.components.PosterCardStyle
-import com.nuvio.tv.ui.theme.NuvioColors
+import com.nuvio.tv.ui.components.collectionFolderCardImageUrl
+import com.nuvio.tv.ui.components.nuvioCardDepth
+import com.nuvio.tv.ui.components.rememberArtworkBackedCardGlow
 
-/** Minimum interval between processed key repeat events to prevent HWUI overload. */
-private const val KEY_REPEAT_THROTTLE_MS = 80L
-
-@OptIn(ExperimentalTvMaterial3Api::class, ExperimentalFoundationApi::class)
+@OptIn(ExperimentalTvMaterial3Api::class, ExperimentalFoundationApi::class, ExperimentalComposeUiApi::class)
 @Composable
 fun GridHomeContent(
     uiState: HomeUiState,
@@ -71,52 +104,114 @@ fun GridHomeContent(
     onContinueWatchingPlayManually: (ContinueWatchingItem) -> Unit = {},
     showContinueWatchingManualPlayOption: Boolean = false,
     onNavigateToCatalogSeeAll: (String, String, String) -> Unit,
+    onNavigateToFolderDetail: (String, String) -> Unit = { _, _ -> },
     onRemoveContinueWatching: (String, Int?, Int?, Boolean) -> Unit,
     isCatalogItemWatched: (MetaPreview) -> Boolean = { false },
     onCatalogItemLongPress: (MetaPreview, String) -> Unit = { _, _ -> },
     posterCardStyle: PosterCardStyle = PosterCardDefaults.Style,
     onItemFocus: (com.nuvio.tv.domain.model.MetaPreview) -> Unit = {},
-    onSaveGridFocusState: (Int, Int) -> Unit
+    catalogSeeAllLabel: String? = null,
+    onSaveGridFocusState: (Int, Int, String?) -> Unit,
+    onFocusedRowKeyChanged: (String?) -> Unit = {},
+    scrollToTopTrigger: Int = 0
 ) {
     val gridState = rememberLazyGridState(
         initialFirstVisibleItemIndex = gridFocusState.verticalScrollIndex,
         initialFirstVisibleItemScrollOffset = gridFocusState.verticalScrollOffset
     )
+    val focusRequesters = remember { mutableMapOf<String, FocusRequester>() }
+    val lastFocusedGridItemKey = remember { mutableStateOf(gridFocusState.focusedItemKey) }
+    // Saveable so the rows come back where they were left after navigating away and
+    // returning. The restorer falls back to the first card when the remembered one is
+    // off screen, so the scroll has to survive too, not just the index.
+    val lastFocusedCwIndex = rememberSaveable { mutableIntStateOf(-1) }
+    val lastFocusedUpcomingIndex = rememberSaveable { mutableIntStateOf(-1) }
+    val cwFocusRequesters = remember { mutableMapOf<Int, FocusRequester>() }
+    val upcomingFocusRequesters = remember { mutableMapOf<Int, FocusRequester>() }
+    val cwRowFocusRequester = remember { FocusRequester() }
+    val upcomingRowFocusRequester = remember { FocusRequester() }
+    val cwListState = androidx.compose.foundation.lazy.rememberLazyListState()
+    val upcomingListState = androidx.compose.foundation.lazy.rememberLazyListState()
+
+    // Improved Back navigation for CW/Upcoming rows: scroll to first item
+    val contentHasFocus = remember { mutableStateOf(false) }
+    val activeCwRowKey = remember { mutableStateOf<String?>(null) }
+    val cwPendingScrollToStart = remember { mutableIntStateOf(0) }
+    val upcomingPendingScrollToStart = remember { mutableIntStateOf(0) }
+    BackHandler(enabled = contentHasFocus.value && run {
+        val key = activeCwRowKey.value ?: return@run false
+        val idx = if (key == "continue_watching") lastFocusedCwIndex.intValue else lastFocusedUpcomingIndex.intValue
+        idx > 0
+    }) {
+        val key = activeCwRowKey.value ?: return@BackHandler
+        if (key == "continue_watching") {
+            lastFocusedCwIndex.intValue = 0
+            cwPendingScrollToStart.intValue++
+        } else {
+            lastFocusedUpcomingIndex.intValue = 0
+            upcomingPendingScrollToStart.intValue++
+        }
+    }
+
+    // Scroll to top when triggered from sidebar Home button.
+    LaunchedEffect(scrollToTopTrigger) {
+        if (scrollToTopTrigger > 0) {
+            gridState.scrollToItem(0, 0)
+        }
+    }
 
     // Save scroll state when leaving
     DisposableEffect(Unit) {
         onDispose {
             onSaveGridFocusState(
                 gridState.firstVisibleItemIndex,
-                gridState.firstVisibleItemScrollOffset
+                gridState.firstVisibleItemScrollOffset,
+                lastFocusedGridItemKey.value
             )
         }
     }
 
-    // Offset for section indices when continue watching is present
+    LaunchedEffect(gridFocusState.verticalScrollIndex, gridFocusState.verticalScrollOffset) {
+        val targetIndex = gridFocusState.verticalScrollIndex
+        val targetOffset = gridFocusState.verticalScrollOffset
+        if (gridState.firstVisibleItemIndex == targetIndex &&
+            gridState.firstVisibleItemScrollOffset == targetOffset
+        ) {
+            return@LaunchedEffect
+        }
+        if (targetIndex > 0 || targetOffset > 0) {
+            gridState.scrollToItem(targetIndex, targetOffset)
+        }
+    }
+
+    // Offset for section indices: pre-items + continue watching item (if present)
     val gridItems = uiState.gridItems
-    val continueWatchingItems = uiState.continueWatchingItems
+    val continueWatchingItems = if (uiState.continueWatchingEnabled) uiState.continueWatchingItems else emptyList()
     val continueWatchingOffset = if (continueWatchingItems.isNotEmpty()) 1 else 0
+
+    LaunchedEffect(gridItems, gridFocusState.hasSavedFocus, gridFocusState.focusedItemKey) {
+        val targetKey = gridFocusState.focusedItemKey ?: return@LaunchedEffect
+        if (!gridFocusState.hasSavedFocus) return@LaunchedEffect
+        val requester = focusRequesters[targetKey] ?: return@LaunchedEffect
+        repeat(2) { withFrameNanos { } }
+        if (runCatching { requester.requestFocus() }.isSuccess) {
+            lastFocusedGridItemKey.value = targetKey
+        }
+    }
 
     // Build index-to-section mapping for sticky header
     val sectionMapping = remember(gridItems, continueWatchingOffset) {
         buildSectionMapping(gridItems, continueWatchingOffset)
     }
 
-    val currentSectionName by remember(gridState, sectionMapping) {
-        derivedStateOf {
-            sectionMapping.findSectionForIndex(gridState.firstVisibleItemIndex)?.catalogName
-        }
-    }
-
     // Pre-compute whether hero exists to avoid repeated list scan in derivedStateOf
     val hasHero = remember(gridItems) {
         gridItems.firstOrNull() is GridItem.Hero
     }
-    val topPadding = if (hasHero) 0.dp else 24.dp
+    val topPadding = if (hasHero) NuvioTheme.spacing.none else NuvioTheme.spacing.xl
 
     // Determine if hero is scrolled past
-    val isScrolledPastHero by remember(hasHero) {
+    val isScrolledPastHeroState = remember(hasHero, gridState) {
         derivedStateOf {
             if (hasHero) {
                 gridState.firstVisibleItemIndex > 0
@@ -125,24 +220,54 @@ fun GridHomeContent(
             }
         }
     }
-    val shouldRequestInitialFocus = remember(gridFocusState.verticalScrollIndex, gridFocusState.verticalScrollOffset) {
-        gridFocusState.verticalScrollIndex == 0 && gridFocusState.verticalScrollOffset == 0
+    val shouldRequestInitialFocus = remember(
+        gridFocusState.hasSavedFocus,
+        gridFocusState.verticalScrollIndex,
+        gridFocusState.verticalScrollOffset
+    ) {
+        !gridFocusState.hasSavedFocus &&
+            gridFocusState.verticalScrollIndex == 0 &&
+            gridFocusState.verticalScrollOffset == 0
     }
     val heroFocusRequester = remember { FocusRequester() }
+    val savedHeroIndex = rememberSaveable { mutableIntStateOf(0) }
+    val shouldRestoreHeroFocus = gridFocusState.hasSavedFocus &&
+        gridFocusState.focusedItemKey == "hero"
     val firstGridItemFocusRequester = remember { FocusRequester() }
     val hasContinueWatching = continueWatchingItems.isNotEmpty()
     val hasStandaloneFocusableGridItem = remember(gridItems) {
         gridItems.any { it is GridItem.Content || it is GridItem.SeeAll }
     }
 
+    // Once the user scrolls, initial focus must not pull back to the hero.
+    var userScrolledGrid by remember { mutableStateOf(false) }
+    LaunchedEffect(gridState) {
+        snapshotFlow {
+            gridState.firstVisibleItemIndex > 0 || gridState.firstVisibleItemScrollOffset > 0
+        }.collect { scrolledAway ->
+            if (scrolledAway) userScrolledGrid = true
+        }
+    }
+
+    // Keyed on the "is there something focusable" booleans (not gridItems.size, which
+    // churns per catalog and stole focus back to the top); retries until the target attaches.
+    val heroExpected = uiState.heroSectionEnabled && uiState.heroCatalogKeys.isNotEmpty()
+    val heroResolved = !heroExpected || hasHero
+    var heroDeferTimedOut by remember { mutableStateOf(false) }
+    LaunchedEffect(shouldRequestInitialFocus, heroExpected) {
+        if (!shouldRequestInitialFocus || !heroExpected) return@LaunchedEffect
+        delay(2000)
+        heroDeferTimedOut = true
+    }
+    val deferGridContent = shouldRequestInitialFocus && !heroResolved && !heroDeferTimedOut
+
     LaunchedEffect(
         shouldRequestInitialFocus,
         hasHero,
         hasContinueWatching,
-        hasStandaloneFocusableGridItem,
-            gridItems.size
+        hasStandaloneFocusableGridItem
     ) {
-        if (!shouldRequestInitialFocus) return@LaunchedEffect
+        if (!shouldRequestInitialFocus || userScrolledGrid) return@LaunchedEffect
         if (hasContinueWatching && !hasHero) return@LaunchedEffect
         val targetRequester = when {
             hasHero -> heroFocusRequester
@@ -150,228 +275,254 @@ fun GridHomeContent(
             else -> null
         } ?: return@LaunchedEffect
 
-        repeat(2) { withFrameNanos { } }
-        try {
-            targetRequester.requestFocus()
-        } catch (_: IllegalStateException) {
+        repeat(8) {
+            withFrameNanos { }
+            if (userScrolledGrid) return@LaunchedEffect
+            if (runCatching { targetRequester.requestFocus(); true }.getOrDefault(false)) {
+                return@LaunchedEffect
+            }
+        }
+    }
+
+    LaunchedEffect(shouldRestoreHeroFocus, hasHero) {
+        if (!shouldRestoreHeroFocus || !hasHero) return@LaunchedEffect
+        gridState.scrollToItem(0)
+        repeat(8) {
+            withFrameNanos { }
+            if (runCatching { heroFocusRequester.requestFocus(); true }.getOrDefault(false)) {
+                return@LaunchedEffect
+            }
         }
     }
 
     // Throttle D-pad key repeats to prevent HWUI overload when a key is held down.
-    val lastKeyRepeatTime = remember { longArrayOf(0L) }
 
-    Box(modifier = Modifier.fillMaxSize()) {
+    val gridItemsWithKeys = remember(gridItems) {
+        val occurrences = mutableMapOf<String, Int>()
+        gridItems.map { item ->
+            val key = when (item) {
+                is GridItem.Hero -> "hero"
+                is GridItem.SectionDivider -> "divider_${item.addonBaseUrl.hashCode()}_${item.catalogId}_${item.addonId}_${item.type}"
+                is GridItem.Content -> {
+                    val base = "content_${item.addonBaseUrl.hashCode()}_${item.catalogId}_${item.item.id}"
+                    val count = occurrences.getOrDefault(base, 0)
+                    occurrences[base] = count + 1
+                    "${base}_$count"
+                }
+                is GridItem.SeeAll -> "see_all_${item.addonBaseUrl.hashCode()}_${item.catalogId}_${item.addonId}_${item.type}"
+                is GridItem.CollectionHeader -> "col_header_${item.collectionId}"
+                is GridItem.CollectionFolder -> "col_folder_${item.collectionId}_${item.folder.id}"
+            }
+            item to key
+        }
+    }
+
+    // Compute the split point: items before the first section divider/collection header
+    // are "pre-section" items (e.g. Hero). Continue Watching goes between them and the rest.
+    val firstSectionIndex = remember(gridItemsWithKeys) {
+        gridItemsWithKeys.indexOfFirst { (item, _) ->
+            item is GridItem.SectionDivider || item is GridItem.CollectionHeader
+        }
+    }
+    val preItems = remember(gridItemsWithKeys, firstSectionIndex) {
+        if (firstSectionIndex > 0) gridItemsWithKeys.subList(0, firstSectionIndex)
+        else if (firstSectionIndex == 0) emptyList()
+        else gridItemsWithKeys // no section divider found — all items are "pre"
+    }
+    val postItems = remember(gridItemsWithKeys, firstSectionIndex) {
+        if (firstSectionIndex >= 0) gridItemsWithKeys.subList(firstSectionIndex, gridItemsWithKeys.size)
+        else emptyList()
+    }
+
+    if (deferGridContent) {
+        if (!LocalStartupSplashEnabled.current) {
+            Box(
+                modifier = Modifier.fillMaxSize(),
+                contentAlignment = Alignment.Center
+            ) {
+                LoadingIndicator()
+            }
+        }
+        return
+    }
+
+    Box(modifier = Modifier.fillMaxSize().background(NuvioTheme.colors.Background)) {
+        val contentFocusRequester = LocalContentFocusRequester.current
+        BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+        val gridWidth = maxWidth
+        // Calculate actual columns from available width (matching GridCells.Adaptive logic)
+        val horizontalPadding = NuvioTheme.spacing.xxxl + NuvioTheme.spacing.xl
+        val spacing = NuvioTheme.spacing.md
+        val availableWidth = gridWidth - horizontalPadding
+        val actualColumnsPerRow = remember(availableWidth, posterCardStyle.width, spacing) {
+            val cols = ((availableWidth + spacing) / (posterCardStyle.width + spacing)).toInt()
+            cols.coerceAtLeast(1)
+        }
+        val gridRowCount = if (posterCardStyle.width.value.toInt() <= 104) 2 else 3
+
+        // Trim content items per section so SeeAll never ends up alone on a new row.
+        val trimmedPostItems = remember(postItems, actualColumnsPerRow, gridRowCount) {
+            if (actualColumnsPerRow <= 1) return@remember postItems
+            val maxItems = actualColumnsPerRow * gridRowCount
+            val result = mutableListOf<Pair<GridItem, String>>()
+            // Process sections: collect items between dividers, then trim if needed
+            var i = 0
+            while (i < postItems.size) {
+                val (item, _) = postItems[i]
+                if (item is GridItem.SectionDivider || item is GridItem.CollectionHeader) {
+                    // Collect all items in this section
+                    result.add(postItems[i])
+                    i++
+                    val sectionContent = mutableListOf<Pair<GridItem, String>>()
+                    var seeAllItem: Pair<GridItem, String>? = null
+                    while (i < postItems.size && postItems[i].first !is GridItem.SectionDivider && postItems[i].first !is GridItem.CollectionHeader) {
+                        if (postItems[i].first is GridItem.SeeAll) {
+                            seeAllItem = postItems[i]
+                        } else if (postItems[i].first is GridItem.Content) {
+                            sectionContent.add(postItems[i])
+                        } else {
+                            sectionContent.add(postItems[i])
+                        }
+                        i++
+                    }
+                    if (seeAllItem != null) {
+                        // Limit content and ensure SeeAll isn't alone on last row
+                        val capped = sectionContent.take(maxItems - 1)
+                        val totalWithSeeAll = capped.size + 1
+                        val lastRowCount = totalWithSeeAll % actualColumnsPerRow
+                        val trimmed = if (lastRowCount == 1 && capped.size >= actualColumnsPerRow) {
+                            // SeeAll would be alone — drop one item so it joins previous row
+                            capped.dropLast(1)
+                        } else {
+                            capped
+                        }
+                        result.addAll(trimmed)
+                        result.add(seeAllItem)
+                    } else {
+                        result.addAll(sectionContent.take(maxItems))
+                    }
+                } else {
+                    result.add(postItems[i])
+                    i++
+                }
+            }
+            result
+        }
+
         LazyVerticalGrid(
             state = gridState,
             columns = GridCells.Adaptive(minSize = posterCardStyle.width),
             modifier = Modifier
                 .fillMaxSize()
-                .onPreviewKeyEvent { event ->
-                    val native = event.nativeKeyEvent
-                    if (native.action == AndroidKeyEvent.ACTION_DOWN && native.repeatCount > 0) {
-                        val now = System.currentTimeMillis()
-                        if (now - lastKeyRepeatTime[0] < KEY_REPEAT_THROTTLE_MS) {
-                            return@onPreviewKeyEvent true
-                        }
-                        lastKeyRepeatTime[0] = now
+                .onFocusChanged {
+                    contentHasFocus.value = it.hasFocus
+                }
+                .focusRequester(contentFocusRequester)
+                .focusRestorer {
+                    val cwRow = activeCwRowKey.value
+                    val fromCwRow = when (cwRow) {
+                        "continue_watching" -> cwRowFocusRequester
+                        "upcoming_section" -> upcomingRowFocusRequester
+                        else -> null
                     }
-                    false
-                },
+                    val lastKey = lastFocusedGridItemKey.value
+                    val fromGrid = lastKey?.let { key -> focusRequesters[key] }
+                    val fromHero = if (hasHero && lastKey == null) heroFocusRequester else null
+                    fromCwRow ?: fromGrid ?: fromHero ?: FocusRequester.Default
+                }
+                .dpadRepeatThrottle(),
             contentPadding = PaddingValues(
-                start = 24.dp,
-                end = 24.dp,
+                start = NuvioTheme.spacing.xxxl,
+                end = NuvioTheme.spacing.xl,
                 top = topPadding,
-                bottom = 32.dp
+                bottom = NuvioTheme.spacing.xxl
             ),
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp)
+            horizontalArrangement = Arrangement.spacedBy(NuvioTheme.spacing.md),
+            verticalArrangement = Arrangement.spacedBy(NuvioTheme.spacing.lg)
         ) {
-            var continueWatchingInserted = false
             var firstGridFocusableAssigned = false
-            val contentOccurrencesByCatalogAndId = mutableMapOf<String, Int>()
 
-            gridItems.forEach { gridItem ->
-                when (gridItem) {
-                    is GridItem.Hero -> {
-                        item(
-                            key = "hero",
-                            span = { GridItemSpan(maxLineSpan) },
-                            contentType = "hero"
-                        ) {
-                            HeroCarousel(
-                                items = gridItem.items,
-                                focusRequester = if (shouldRequestInitialFocus) heroFocusRequester else null,
-                                onItemClick = { item ->
-                                    onNavigateToDetail(
-                                        item.id,
-                                        item.apiType,
-                                        ""
-                                    )
-                                }
-                            )
+            // Emit pre-section items (Hero)
+            if (preItems.isNotEmpty()) {
+                items(
+                    items = preItems,
+                    key = { it.second },
+                    span = { pair ->
+                        val spanCount = when (pair.first) {
+                            is GridItem.Hero, is GridItem.SectionDivider, is GridItem.CollectionHeader -> maxLineSpan
+                            else -> 1
+                        }
+                        GridItemSpan(spanCount)
+                    },
+                    contentType = { pair ->
+                        when (pair.first) {
+                            is GridItem.Hero -> "hero"
+                            is GridItem.SectionDivider -> "divider"
+                            is GridItem.Content -> "content"
+                            is GridItem.SeeAll -> "see_all"
+                            is GridItem.CollectionHeader -> "collection_header"
+                            is GridItem.CollectionFolder -> "collection_folder"
                         }
                     }
-
-                    is GridItem.SectionDivider -> {
-                        // Insert continue watching before the first section divider
-                        if (!continueWatchingInserted && continueWatchingItems.isNotEmpty()) {
-                            continueWatchingInserted = true
-                            item(
-                                key = "continue_watching",
-                                span = { GridItemSpan(maxLineSpan) },
-                                contentType = "continue_watching"
-                            ) {
-                                GridContinueWatchingSection(
-                                    items = continueWatchingItems,
-                                    focusedItemIndex = if (shouldRequestInitialFocus && !hasHero) 0 else -1,
-                                    onItemClick = { item ->
-                                        onContinueWatchingClick(item)
-                                    },
-                                    onStartFromBeginning = onContinueWatchingStartFromBeginning,
-                                    showManualPlayOption = showContinueWatchingManualPlayOption,
-                                    onPlayManually = onContinueWatchingPlayManually,
-                                    onDetailsClick = { item ->
+                ) { (gridItem, itemKey) ->
+                    when (gridItem) {
+                        is GridItem.Hero -> {
+                            HeroCarousel(
+                                items = gridItem.items.asStable(),
+                                focusRequester = if (shouldRequestInitialFocus || shouldRestoreHeroFocus) heroFocusRequester else null,
+                                showImdbRatings = uiState.homeImdbRatingsVisibility.showRatings,
+                                initialActiveIndex = savedHeroIndex.intValue,
+                                onItemFocus = {
+                                    lastFocusedGridItemKey.value = "hero"
+                                    activeCwRowKey.value = null
+                                },
+                                onActiveItemChanged = { item ->
+                                    val idx = gridItem.items.indexOfFirst { it.id == item.id }
+                                    if (idx >= 0) savedHeroIndex.intValue = idx
+                                },
+                                onItemClick = remember(onNavigateToDetail) {
+                                    { item ->
                                         onNavigateToDetail(
-                                            when (item) {
-                                                is ContinueWatchingItem.InProgress -> item.progress.contentId
-                                                is ContinueWatchingItem.NextUp -> item.info.contentId
-                                            },
-                                            when (item) {
-                                                is ContinueWatchingItem.InProgress -> item.progress.contentType
-                                                is ContinueWatchingItem.NextUp -> item.info.contentType
-                                            },
+                                            item.id,
+                                            item.apiType,
                                             ""
                                         )
-                                    },
-                                    onRemoveItem = { item ->
-                                        val contentId = when (item) {
-                                            is ContinueWatchingItem.InProgress -> item.progress.contentId
-                                            is ContinueWatchingItem.NextUp -> item.info.contentId
-                                        }
-                                        val season = when (item) {
-                                            is ContinueWatchingItem.InProgress -> item.progress.season
-                                            is ContinueWatchingItem.NextUp -> item.info.season
-                                        }
-                                        val episode = when (item) {
-                                            is ContinueWatchingItem.InProgress -> item.progress.episode
-                                            is ContinueWatchingItem.NextUp -> item.info.episode
-                                        }
-                                        val isNextUp = item is ContinueWatchingItem.NextUp
-                                        onRemoveContinueWatching(contentId, season, episode, isNextUp)
                                     }
-                                )
-                            }
-                        }
-
-                        item(
-                            key = "divider_${gridItem.catalogId}_${gridItem.addonId}_${gridItem.type}",
-                            span = { GridItemSpan(maxLineSpan) },
-                            contentType = "divider"
-                        ) {
-                            val strTypeMovie = stringResource(R.string.type_movie)
-                            val strTypeSeries = stringResource(R.string.type_series)
-                            val typeLabel = when (gridItem.type.lowercase()) {
-                                "movie" -> strTypeMovie
-                                "series" -> strTypeSeries
-                                else -> gridItem.type.replaceFirstChar { it.uppercase() }
-                            }
-                            val displayName = if (uiState.catalogTypeSuffixEnabled && typeLabel.isNotBlank()) {
-                                "${gridItem.catalogName.replaceFirstChar { it.uppercase() }} - $typeLabel"
-                            } else {
-                                gridItem.catalogName.replaceFirstChar { it.uppercase() }
-                            }
-                            SectionDivider(
-                                catalogName = displayName
-                            )
-                        }
-                    }
-
-                    is GridItem.Content -> {
-                        val focusRequester = if (
-                            shouldRequestInitialFocus &&
-                            !hasHero &&
-                            !hasContinueWatching &&
-                            !firstGridFocusableAssigned
-                        ) {
-                            firstGridFocusableAssigned = true
-                            firstGridItemFocusRequester
-                        } else {
-                            null
-                        }
-                        val occurrenceBaseKey = "${gridItem.catalogId}|${gridItem.item.id}"
-                        val occurrence = contentOccurrencesByCatalogAndId.getOrDefault(occurrenceBaseKey, 0)
-                        contentOccurrencesByCatalogAndId[occurrenceBaseKey] = occurrence + 1
-                        item(
-                            key = "content_${gridItem.catalogId}_${gridItem.item.id}_$occurrence",
-                            span = { GridItemSpan(1) },
-                            contentType = "content"
-                        ) {
-                            GridContentCard(
-                                item = gridItem.item,
-                                focusRequester = focusRequester,
-                                posterCardStyle = posterCardStyle,
-                                showLabel = uiState.posterLabelsEnabled,
-                                isWatched = isCatalogItemWatched(gridItem.item),
-                                onFocused = { onItemFocus(gridItem.item) },
-                                onClick = {
-                                    onNavigateToDetail(
-                                        gridItem.item.id,
-                                        gridItem.item.apiType,
-                                        gridItem.addonBaseUrl
-                                    )
                                 },
-                                onLongPress = {
-                                    onCatalogItemLongPress(gridItem.item, gridItem.addonBaseUrl)
-                                }
+                                fullWidth = gridWidth,
+                                modifier = Modifier.fillMaxWidth()
                             )
                         }
-                    }
-
-                    is GridItem.SeeAll -> {
-                        val focusRequester = if (
-                            shouldRequestInitialFocus &&
-                            !hasHero &&
-                            !hasContinueWatching &&
-                            !firstGridFocusableAssigned
-                        ) {
-                            firstGridFocusableAssigned = true
-                            firstGridItemFocusRequester
-                        } else {
-                            null
-                        }
-                        item(
-                            key = "see_all_${gridItem.catalogId}_${gridItem.addonId}_${gridItem.type}",
-                            span = { GridItemSpan(1) },
-                            contentType = "see_all"
-                        ) {
-                            SeeAllGridCard(
-                                posterCardStyle = posterCardStyle,
-                                focusRequester = focusRequester,
-                                onClick = {
-                                    onNavigateToCatalogSeeAll(
-                                        gridItem.catalogId,
-                                        gridItem.addonId,
-                                        gridItem.type
-                                    )
-                                }
-                            )
-                        }
+                        else -> { /* pre-section should only contain Hero */ }
                     }
                 }
             }
 
-            if (!continueWatchingInserted && continueWatchingItems.isNotEmpty()) {
+            // Emit Continue Watching as a dedicated item
+            if (continueWatchingItems.isNotEmpty()) {
                 item(
-                    key = "continue_watching_fallback",
+                    key = "continue_watching",
                     span = { GridItemSpan(maxLineSpan) },
                     contentType = "continue_watching"
                 ) {
+                    LaunchedEffect(cwPendingScrollToStart.intValue) {
+                        if (cwPendingScrollToStart.intValue > 0) {
+                            cwListState.scrollToItem(0, 0)
+                            cwRowFocusRequester.let { runCatching { it.requestFocus() } }
+                            cwPendingScrollToStart.intValue = 0
+                        }
+                    }
                     GridContinueWatchingSection(
+                        modifier = Modifier.fillMaxWidth(),
+                        fullWidth = gridWidth,
                         items = continueWatchingItems,
                         focusedItemIndex = if (shouldRequestInitialFocus && !hasHero) 0 else -1,
-                        onItemClick = { item ->
-                            onContinueWatchingClick(item)
-                        },
+                        lastFocusedIndex = lastFocusedCwIndex,
+                        focusRequesters = cwFocusRequesters,
+                        rowFocusRequester = cwRowFocusRequester,
+                        listState = cwListState,
+                        onItemFocused = { lastFocusedCwIndex.intValue = it; activeCwRowKey.value = "continue_watching" },
+                        onItemClick = onContinueWatchingClick,
                         onStartFromBeginning = onContinueWatchingStartFromBeginning,
                         showManualPlayOption = showContinueWatchingManualPlayOption,
                         onPlayManually = onContinueWatchingPlayManually,
@@ -395,30 +546,290 @@ fun GridHomeContent(
                             }
                             val season = when (item) {
                                 is ContinueWatchingItem.InProgress -> item.progress.season
-                                is ContinueWatchingItem.NextUp -> item.info.season
+                                is ContinueWatchingItem.NextUp -> item.info.seedSeason
                             }
                             val episode = when (item) {
                                 is ContinueWatchingItem.InProgress -> item.progress.episode
-                                is ContinueWatchingItem.NextUp -> item.info.episode
+                                is ContinueWatchingItem.NextUp -> item.info.seedEpisode
                             }
                             val isNextUp = item is ContinueWatchingItem.NextUp
                             onRemoveContinueWatching(contentId, season, episode, isNextUp)
-                        }
+                        },
+                        blurUnwatchedEpisodes = uiState.blurUnwatchedEpisodes,
+                        useEpisodeThumbnails = uiState.useEpisodeThumbnailsInCw,
+                        cardStyle = uiState.continueWatchingCardStyle,
+                        cornerRadius = posterCardStyle.cornerRadius
                     )
                 }
             }
-        }
+
+            // Emit Upcoming section if SPLIT_UPCOMING mode has upcoming items
+            if (uiState.continueWatchingEnabled && uiState.upcomingItems.isNotEmpty()) {
+                item(
+                    key = "upcoming_section",
+                    span = { GridItemSpan(maxLineSpan) },
+                    contentType = "upcoming_section"
+                ) {
+                    LaunchedEffect(upcomingPendingScrollToStart.intValue) {
+                        if (upcomingPendingScrollToStart.intValue > 0) {
+                            upcomingListState.scrollToItem(0, 0)
+                            upcomingRowFocusRequester.let { runCatching { it.requestFocus() } }
+                            upcomingPendingScrollToStart.intValue = 0
+                        }
+                    }
+                    GridContinueWatchingSection(
+                        modifier = Modifier.fillMaxWidth(),
+                        fullWidth = gridWidth,
+                        items = uiState.upcomingItems,
+                        title = stringResource(R.string.upcoming_section_title),
+                        lastFocusedIndex = lastFocusedUpcomingIndex,
+                        focusRequesters = upcomingFocusRequesters,
+                        rowFocusRequester = upcomingRowFocusRequester,
+                        listState = upcomingListState,
+                        onItemFocused = { lastFocusedUpcomingIndex.intValue = it; activeCwRowKey.value = "upcoming_section" },
+                        onItemClick = onContinueWatchingClick,
+                        onStartFromBeginning = onContinueWatchingStartFromBeginning,
+                        showManualPlayOption = showContinueWatchingManualPlayOption,
+                        onPlayManually = onContinueWatchingPlayManually,
+                        onDetailsClick = { item ->
+                            onNavigateToDetail(
+                                when (item) {
+                                    is ContinueWatchingItem.InProgress -> item.progress.contentId
+                                    is ContinueWatchingItem.NextUp -> item.info.contentId
+                                },
+                                when (item) {
+                                    is ContinueWatchingItem.InProgress -> item.progress.contentType
+                                    is ContinueWatchingItem.NextUp -> item.info.contentType
+                                },
+                                ""
+                            )
+                        },
+                        onRemoveItem = { item ->
+                            val contentId = when (item) {
+                                is ContinueWatchingItem.InProgress -> item.progress.contentId
+                                is ContinueWatchingItem.NextUp -> item.info.contentId
+                            }
+                            val season = when (item) {
+                                is ContinueWatchingItem.InProgress -> item.progress.season
+                                is ContinueWatchingItem.NextUp -> item.info.seedSeason
+                            }
+                            val episode = when (item) {
+                                is ContinueWatchingItem.InProgress -> item.progress.episode
+                                is ContinueWatchingItem.NextUp -> item.info.seedEpisode
+                            }
+                            val isNextUp = item is ContinueWatchingItem.NextUp
+                            onRemoveContinueWatching(contentId, season, episode, isNextUp)
+                        },
+                        blurUnwatchedEpisodes = uiState.blurUnwatchedEpisodes,
+                        useEpisodeThumbnails = uiState.useEpisodeThumbnailsInCw,
+                        cardStyle = uiState.continueWatchingCardStyle,
+                        cornerRadius = posterCardStyle.cornerRadius
+                    )
+                }
+            }
+
+            // Emit post-section items (SectionDividers, Content, SeeAll, Collections)
+            if (trimmedPostItems.isNotEmpty()) {
+                items(
+                    items = trimmedPostItems,
+                    key = { it.second },
+                    span = { pair ->
+                        val spanCount = when (pair.first) {
+                            is GridItem.Hero, is GridItem.SectionDivider, is GridItem.CollectionHeader -> maxLineSpan
+                            else -> 1
+                        }
+                        GridItemSpan(spanCount)
+                    },
+                    contentType = { pair ->
+                        when (pair.first) {
+                            is GridItem.Hero -> "hero"
+                            is GridItem.SectionDivider -> "divider"
+                            is GridItem.Content -> "content"
+                            is GridItem.SeeAll -> "see_all"
+                            is GridItem.CollectionHeader -> "collection_header"
+                            is GridItem.CollectionFolder -> "collection_folder"
+                        }
+                    }
+                ) { (gridItem, itemKey) ->
+                when (gridItem) {
+                    is GridItem.Hero -> {
+                        HeroCarousel(
+                            items = gridItem.items.asStable(),
+                            focusRequester = if (shouldRequestInitialFocus || shouldRestoreHeroFocus) heroFocusRequester else null,
+                            showImdbRatings = uiState.homeImdbRatingsVisibility.showRatings,
+                            initialActiveIndex = savedHeroIndex.intValue,
+                            onItemFocus = {
+                                lastFocusedGridItemKey.value = "hero"
+                                activeCwRowKey.value = null
+                            },
+                            onActiveItemChanged = { item ->
+                                val idx = gridItem.items.indexOfFirst { it.id == item.id }
+                                if (idx >= 0) savedHeroIndex.intValue = idx
+                            },
+                            onItemClick = remember(onNavigateToDetail) {
+                                { item ->
+                                    onNavigateToDetail(
+                                        item.id,
+                                        item.apiType,
+                                        ""
+                                    )
+                                }
+                            },
+                            fullWidth = gridWidth,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+
+                    is GridItem.SectionDivider -> {
+                        val strTypeMovie = stringResource(R.string.type_movie)
+                        val strTypeSeries = stringResource(R.string.type_series)
+                        val typeLabel = when (gridItem.type.lowercase()) {
+                            "movie" -> strTypeMovie
+                            "series" -> strTypeSeries
+                            else -> gridItem.type.replaceFirstChar { it.uppercase() }
+                        }
+                        val displayName = if (uiState.catalogTypeSuffixEnabled && typeLabel.isNotBlank()) {
+                            "${gridItem.catalogName.replaceFirstChar { it.uppercase() }} - $typeLabel"
+                        } else {
+                            gridItem.catalogName.replaceFirstChar { it.uppercase() }
+                        }
+                        SectionDivider(
+                            catalogName = displayName
+                        )
+                    }
+
+                    is GridItem.Content -> {
+                        val focusRequester = if (
+                            shouldRequestInitialFocus &&
+                            !hasHero &&
+                            !hasContinueWatching &&
+                            !firstGridFocusableAssigned
+                        ) {
+                            firstGridFocusableAssigned = true
+                            firstGridItemFocusRequester
+                        } else {
+                            null
+                        }
+                        GridContentCard(
+                            item = gridItem.item,
+                            focusRequester = focusRequester ?: focusRequesters.getOrPut(itemKey) { FocusRequester() },
+                            posterCardStyle = posterCardStyle,
+                            showLabel = uiState.posterLabelsEnabled,
+                            isWatched = isCatalogItemWatched(gridItem.item),
+                            onFocused = remember(itemKey, gridItem.item) {
+                                {
+                                    lastFocusedGridItemKey.value = itemKey
+                                    activeCwRowKey.value = null
+                                    // No rows here, but a card still belongs to one.
+                                    onFocusedRowKeyChanged(
+                                        catalogRowStableKey(
+                                            gridItem.addonId,
+                                            gridItem.addonBaseUrl,
+                                            gridItem.item.apiType,
+                                            gridItem.catalogId
+                                        )
+                                    )
+                                    onItemFocus(gridItem.item)
+                                }
+                            },
+                            onClick = remember(gridItem.item, gridItem.addonBaseUrl) {
+                                {
+                                    onNavigateToDetail(
+                                        gridItem.item.id,
+                                        gridItem.item.apiType,
+                                        gridItem.addonBaseUrl
+                                    )
+                                }
+                            },
+                            onLongPress = remember(gridItem.item, gridItem.addonBaseUrl) {
+                                {
+                                    onCatalogItemLongPress(gridItem.item, gridItem.addonBaseUrl)
+                                }
+                            }
+                        )
+                    }
+
+                    is GridItem.SeeAll -> {
+                        val focusRequester = if (
+                            shouldRequestInitialFocus &&
+                            !hasHero &&
+                            !hasContinueWatching &&
+                            !firstGridFocusableAssigned
+                        ) {
+                            firstGridFocusableAssigned = true
+                            firstGridItemFocusRequester
+                        } else {
+                            null
+                        }
+                        SeeAllGridCard(
+                            posterCardStyle = posterCardStyle,
+                            focusRequester = focusRequester,
+                            label = catalogSeeAllLabel,
+                            onClick = {
+                                onNavigateToCatalogSeeAll(
+                                    gridItem.catalogId,
+                                    gridItem.addonId,
+                                    gridItem.type
+                                )
+                            }
+                        )
+                    }
+
+                    is GridItem.CollectionHeader -> {
+                        SectionDivider(catalogName = gridItem.title)
+                    }
+
+                    is GridItem.CollectionFolder -> {
+                        GridCollectionFolderCard(
+                            folder = gridItem.folder,
+                            collectionTitle = gridItem.collectionTitle,
+                            focusGlowEnabled = gridItem.focusGlowEnabled,
+                            posterCardStyle = posterCardStyle,
+                            focusRequester = focusRequesters.getOrPut(itemKey) { FocusRequester() },
+                            onFocused = remember(itemKey) { { lastFocusedGridItemKey.value = itemKey; activeCwRowKey.value = null } },
+                            onClick = remember(gridItem.collectionId, gridItem.folder.id) {
+                                {
+                                    onNavigateToFolderDetail(gridItem.collectionId, gridItem.folder.id)
+                                }
+                            }
+                        )
+                    }
+                }
+            }
+            }
+
+        } // end LazyVerticalGrid
+        } // end BoxWithConstraints
 
         // Sticky header overlay
-        AnimatedVisibility(
-            visible = isScrolledPastHero && currentSectionName != null,
-            enter = fadeIn(),
-            exit = fadeOut()
-        ) {
-            StickyCategoryHeader(
-                sectionName = currentSectionName ?: ""
-            )
+        GridStickyHeader(
+            gridState = gridState,
+            sectionMapping = sectionMapping,
+            isScrolledPastHeroState = isScrolledPastHeroState
+        )
+    }
+}
+
+@Composable
+private fun GridStickyHeader(
+    gridState: androidx.compose.foundation.lazy.grid.LazyGridState,
+    sectionMapping: SectionMapping,
+    isScrolledPastHeroState: androidx.compose.runtime.State<Boolean>
+) {
+    val currentSectionName by remember(gridState, sectionMapping) {
+        derivedStateOf {
+            sectionMapping.findSectionForIndex(gridState.firstVisibleItemIndex)?.catalogName
         }
+    }
+
+    AnimatedVisibility(
+        visible = isScrolledPastHeroState.value && currentSectionName != null,
+        enter = fadeIn(),
+        exit = fadeOut()
+    ) {
+        StickyCategoryHeader(
+            sectionName = currentSectionName ?: ""
+        )
     }
 }
 
@@ -430,12 +841,12 @@ private fun SectionDivider(
     Box(
         modifier = modifier
             .fillMaxWidth()
-            .padding(top = 24.dp, bottom = 12.dp, start = 24.dp, end = 24.dp)
+            .padding(top = NuvioTheme.spacing.xl, bottom = NuvioTheme.spacing.md)
     ) {
         Text(
             text = catalogName,
             style = MaterialTheme.typography.headlineMedium,
-            color = NuvioColors.TextPrimary
+            color = NuvioTheme.colors.TextPrimary
         )
     }
 }
@@ -445,7 +856,7 @@ private fun StickyCategoryHeader(
     sectionName: String,
     modifier: Modifier = Modifier
 ) {
-    val bgColor = NuvioColors.Background
+    val bgColor = NuvioTheme.colors.Background
     val headerGradient = remember(bgColor) {
         Brush.verticalGradient(
             colorStops = arrayOf(
@@ -460,12 +871,12 @@ private fun StickyCategoryHeader(
         modifier = modifier
             .fillMaxWidth()
             .background(headerGradient)
-            .padding(horizontal = 48.dp, vertical = 12.dp)
+            .padding(horizontal = NuvioTheme.spacing.xxxl, vertical = NuvioTheme.spacing.md)
     ) {
         Text(
             text = sectionName,
             style = MaterialTheme.typography.titleLarge,
-            color = NuvioColors.TextPrimary
+            color = NuvioTheme.colors.TextPrimary
         )
     }
 }
@@ -476,52 +887,202 @@ private fun SeeAllGridCard(
     onClick: () -> Unit,
     posterCardStyle: PosterCardStyle,
     focusRequester: FocusRequester? = null,
+    label: String? = null,
     modifier: Modifier = Modifier
 ) {
     val seeAllCardShape = RoundedCornerShape(posterCardStyle.cornerRadius)
+    val cardDepthStyle = LocalCardDepthStyle.current
+    Column(
+        modifier = modifier.width(posterCardStyle.width)
+    ) {
+        Card(
+            onClick = onClick,
+            modifier = Modifier
+                .width(posterCardStyle.width)
+                .height(posterCardStyle.height)
+                .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier),
+            shape = CardDefaults.shape(
+                shape = seeAllCardShape
+            ),
+            colors = CardDefaults.colors(
+                containerColor = NuvioTheme.colors.BackgroundCard,
+                focusedContainerColor = NuvioTheme.colors.BackgroundCard
+            ),
+            border = CardDefaults.border(
+                focusedBorder = Border(
+                    border = NuvioTheme.focusRing.border(posterCardStyle.focusedBorderWidth),
+                    shape = seeAllCardShape
+                )
+            ),
+            scale = CardDefaults.scale(
+                focusedScale = posterCardStyle.focusedScale
+            )
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .clip(seeAllCardShape)
+                    .nuvioCardDepth(
+                        shape = seeAllCardShape,
+                        surface = CardDepthSurface.POSTERS,
+                        style = cardDepthStyle
+                    ),
+                contentAlignment = Alignment.Center
+            ) {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Filled.ArrowForward,
+                        contentDescription = label ?: stringResource(R.string.action_see_all),
+                        modifier = Modifier.size(NuvioTheme.spacing.xxl),
+                        tint = NuvioTheme.colors.TextSecondary
+                    )
+                    Spacer(modifier = Modifier.height(NuvioTheme.spacing.sm))
+                    Text(
+                        text = label ?: stringResource(R.string.action_see_all),
+                        style = MaterialTheme.typography.titleSmall,
+                        color = NuvioTheme.colors.TextSecondary,
+                        textAlign = TextAlign.Center
+                    )
+                }
+            }
+        }
+        // Reserve space for label to match other grid cards
+        Spacer(
+            modifier = Modifier
+                .width(posterCardStyle.width)
+                .padding(top = NuvioTheme.spacing.sm)
+                .height(MaterialTheme.typography.titleMedium.lineHeight.value.dp)
+        )
+    }
+}
+
+@OptIn(ExperimentalTvMaterial3Api::class)
+@Composable
+private fun GridCollectionFolderCard(
+    folder: CollectionFolder,
+    collectionTitle: String,
+    focusGlowEnabled: Boolean,
+    posterCardStyle: PosterCardStyle,
+    onClick: () -> Unit,
+    focusRequester: FocusRequester? = null,
+    onFocused: () -> Unit = {},
+    modifier: Modifier = Modifier
+) {
+    val cardShape = RoundedCornerShape(posterCardStyle.cornerRadius)
+    val cardDepthStyle = LocalCardDepthStyle.current
+    var isFocused by remember { mutableStateOf(false) }
+    val cardGlow = rememberArtworkBackedCardGlow(
+        imageUrl = folder.coverImageUrl,
+        fallbackSeed = "$collectionTitle:${folder.title}:${folder.coverEmoji.orEmpty()}",
+        enabled = focusGlowEnabled
+    )
+    val folderAspectRatio = when (folder.tileShape) {
+        PosterShape.LANDSCAPE -> 16f / 9f
+        PosterShape.SQUARE -> 1f
+        PosterShape.POSTER -> posterCardStyle.aspectRatio
+    }
     Card(
         onClick = onClick,
         modifier = modifier
             .fillMaxWidth()
-            .aspectRatio(posterCardStyle.aspectRatio)
-            .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier),
-        shape = CardDefaults.shape(
-            shape = seeAllCardShape
-        ),
+            .aspectRatio(folderAspectRatio)
+            .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
+            .onFocusChanged {
+                isFocused = it.isFocused
+                if (it.isFocused) onFocused()
+            },
+        shape = CardDefaults.shape(shape = cardShape),
         colors = CardDefaults.colors(
-            containerColor = NuvioColors.BackgroundCard,
-            focusedContainerColor = NuvioColors.BackgroundCard
+            containerColor = NuvioTheme.colors.BackgroundCard,
+            focusedContainerColor = NuvioTheme.colors.BackgroundCard
         ),
         border = CardDefaults.border(
             focusedBorder = Border(
-                border = BorderStroke(posterCardStyle.focusedBorderWidth, NuvioColors.FocusRing),
-                shape = seeAllCardShape
+                border = NuvioTheme.focusRing.border(posterCardStyle.focusedBorderWidth),
+                shape = cardShape
             )
         ),
-        scale = CardDefaults.scale(
-            focusedScale = posterCardStyle.focusedScale
-        )
+        scale = CardDefaults.scale(focusedScale = posterCardStyle.focusedScale),
+        glow = cardGlow
     ) {
         Box(
-            modifier = Modifier.fillMaxSize(),
-            contentAlignment = Alignment.Center
+            modifier = Modifier
+                .fillMaxSize()
+                .clip(cardShape)
+                .nuvioCardDepth(
+                    shape = cardShape,
+                    surface = CardDepthSurface.POSTERS,
+                    style = cardDepthStyle
+                )
         ) {
-            Column(
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.Center
-            ) {
-                Icon(
-                    imageVector = Icons.AutoMirrored.Filled.ArrowForward,
-                    contentDescription = stringResource(R.string.action_see_all),
-                    modifier = Modifier.size(32.dp),
-                    tint = NuvioColors.TextSecondary
+            val activeImageUrl = collectionFolderCardImageUrl(folder, isFocused)
+            if (!activeImageUrl.isNullOrBlank()) {
+                AsyncImage(
+                    model = activeImageUrl,
+                    contentDescription = folder.title,
+                    modifier = Modifier.fillMaxSize().clip(cardShape),
+                    contentScale = ContentScale.FillBounds
                 )
-                Spacer(modifier = Modifier.height(8.dp))
-                Text(
-                    text = stringResource(R.string.action_see_all),
-                    style = MaterialTheme.typography.titleSmall,
-                    color = NuvioColors.TextSecondary
+            } else if (!folder.coverEmoji.isNullOrBlank()) {
+                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Text(text = folder.coverEmoji, fontSize = 36.sp)
+                }
+            } else {
+                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Text(
+                        text = folder.title.take(2).uppercase(),
+                        style = MaterialTheme.typography.headlineMedium,
+                        color = NuvioTheme.colors.TextSecondary
+                    )
+                }
+            }
+
+            // GIF overlay: show on top of cover image or emoji, visible only once loaded
+            val focusGifUrl = if (isFocused && folder.focusGifEnabled) folder.focusGifUrl else null
+            if (!focusGifUrl.isNullOrBlank()) {
+                var gifLoaded by remember(focusGifUrl) { mutableStateOf(false) }
+                val gifAlpha by animateFloatAsState(
+                    targetValue = if (gifLoaded) 1f else 0f,
+                    animationSpec = tween(durationMillis = 200),
+                    label = "gifFadeIn"
                 )
+                AsyncImage(
+                    model = focusGifUrl,
+                    contentDescription = null,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .clip(cardShape)
+                        .graphicsLayer { alpha = gifAlpha },
+                    contentScale = ContentScale.FillBounds,
+                    onSuccess = { gifLoaded = true }
+                )
+            }
+
+            if (!folder.hideTitle) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .align(Alignment.BottomCenter)
+                        .background(
+                            Brush.verticalGradient(
+                                colors = listOf(Color.Transparent, Color.Black.copy(alpha = 0.7f))
+                            )
+                        )
+                        .padding(NuvioTheme.spacing.sm),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = folder.title,
+                        style = MaterialTheme.typography.labelMedium,
+                        color = Color.White,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        textAlign = TextAlign.Center
+                    )
+                }
             }
         }
     }

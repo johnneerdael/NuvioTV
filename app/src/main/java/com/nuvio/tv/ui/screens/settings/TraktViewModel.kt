@@ -4,11 +4,10 @@ import android.content.Context
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.nuvio.tv.R
-import com.nuvio.tv.core.sync.StartupSyncService
 import com.nuvio.tv.data.local.TraktAuthDataStore
 import com.nuvio.tv.data.local.TraktAuthState
 import com.nuvio.tv.data.local.TraktSettingsDataStore
-import com.nuvio.tv.data.local.WatchProgressSource
+import com.nuvio.tv.data.local.MoreLikeThisSourcePreference
 import com.nuvio.tv.data.repository.TraktAuthService
 import com.nuvio.tv.data.repository.TraktProgressService
 import com.nuvio.tv.data.repository.TraktTokenPollResult
@@ -43,11 +42,11 @@ data class TraktUiState(
     val pollIntervalSeconds: Int = 5,
     val deviceCodeExpiresAtMillis: Long? = null,
     val continueWatchingDaysCap: Int = TraktSettingsDataStore.DEFAULT_CONTINUE_WATCHING_DAYS_CAP,
-    val showUnairedNextUp: Boolean = TraktSettingsDataStore.DEFAULT_SHOW_UNAIRED_NEXT_UP,
-    val watchProgressSource: WatchProgressSource = TraktSettingsDataStore.DEFAULT_WATCH_PROGRESS_SOURCE,
+    val showMetaComments: Boolean = TraktSettingsDataStore.DEFAULT_SHOW_META_COMMENTS,
     val connectedStats: TraktProgressService.TraktCachedStats? = null,
     val statusMessage: String? = null,
-    val errorMessage: String? = null
+    val errorMessage: String? = null,
+    val moreLikeThisSource: MoreLikeThisSourcePreference = TraktSettingsDataStore.DEFAULT_MORE_LIKE_THIS_SOURCE
 )
 
 @HiltViewModel
@@ -56,12 +55,12 @@ class TraktViewModel @Inject constructor(
     private val traktAuthDataStore: TraktAuthDataStore,
     private val traktProgressService: TraktProgressService,
     private val traktSettingsDataStore: TraktSettingsDataStore,
-    private val startupSyncService: StartupSyncService,
     @dagger.hilt.android.qualifiers.ApplicationContext private val context: Context
 ) : ViewModel() {
     private val _uiState = MutableStateFlow(TraktUiState())
     val uiState: StateFlow<TraktUiState> = _uiState.asStateFlow()
 
+    private var connectJob: Job? = null
     private var pollJob: Job? = null
     private var lastMode: TraktConnectionMode? = null
     private var lastAutoSyncAtMs: Long = 0L
@@ -81,46 +80,32 @@ class TraktViewModel @Inject constructor(
             _uiState.update {
                 it.copy(
                     continueWatchingDaysCap = days,
-                    statusMessage = "Continue watching window updated"
+                    statusMessage = context.getString(R.string.trakt_status_cw_window_updated)
                 )
             }
         }
     }
 
-    fun onShowUnairedNextUpChanged(enabled: Boolean) {
+    fun onShowMetaCommentsChanged(enabled: Boolean) {
         viewModelScope.launch {
-            traktSettingsDataStore.setShowUnairedNextUp(enabled)
+            traktSettingsDataStore.setShowMetaComments(enabled)
             _uiState.update {
                 it.copy(
-                    showUnairedNextUp = enabled,
+                    showMetaComments = enabled,
                     statusMessage = if (enabled) {
-                        context.getString(R.string.trakt_unaired_now_shown)
+                        context.getString(R.string.trakt_comments_now_shown)
                     } else {
-                        context.getString(R.string.trakt_unaired_now_hidden)
+                        context.getString(R.string.trakt_comments_now_hidden)
                     }
                 )
             }
         }
     }
 
-    fun onWatchProgressSourceSelected(source: WatchProgressSource) {
+    fun onMoreLikeThisSourceSelected(source: MoreLikeThisSourcePreference) {
         viewModelScope.launch {
-            traktSettingsDataStore.setWatchProgressSource(source)
-            if (source == WatchProgressSource.TRAKT) {
-                traktProgressService.refreshNow()
-            } else {
-                startupSyncService.requestSyncNow()
-            }
-            _uiState.update {
-                it.copy(
-                    watchProgressSource = source,
-                    statusMessage = if (source == WatchProgressSource.TRAKT) {
-                        context.getString(R.string.trakt_watch_progress_trakt_selected)
-                    } else {
-                        context.getString(R.string.trakt_watch_progress_nuvio_selected)
-                    }
-                )
-            }
+            traktSettingsDataStore.setMoreLikeThisSource(source)
+            _uiState.update { it.copy(moreLikeThisSource = source) }
         }
     }
 
@@ -128,27 +113,42 @@ class TraktViewModel @Inject constructor(
         if (!traktAuthService.hasRequiredCredentials()) {
             _uiState.update {
                 it.copy(
-                    errorMessage = "Missing TRAKT_CLIENT_ID or TRAKT_CLIENT_SECRET in local.properties",
+                    errorMessage = context.getString(R.string.trakt_missing_credentials),
                     credentialsConfigured = false
                 )
             }
             return
         }
 
-        viewModelScope.launch {
-            _uiState.update { it.copy(isLoading = true, errorMessage = null, statusMessage = null) }
-            val result = traktAuthService.startDeviceAuth()
-            _uiState.update { state ->
-                if (result.isSuccess) {
-                    state.copy(
-                        isLoading = false,
-                        statusMessage = "Enter code on trakt.tv/activate"
-                    )
-                } else {
-                    state.copy(
-                        isLoading = false,
-                        errorMessage = result.exceptionOrNull()?.message ?: "Failed to start Trakt auth"
-                    )
+        // Guard against rapid re-entry — each double-tap would otherwise fire a
+        // fresh /oauth/device/code request and can trip Trakt's rate limiter (#1197).
+        // Flip isLoading synchronously here, before the launch, so two main-thread
+        // clicks can't both observe isLoading == false and start parallel
+        // coroutines (thanks Copilot).
+        if (connectJob?.isActive == true || _uiState.value.isLoading) return
+        _uiState.update { it.copy(isLoading = true, errorMessage = null, statusMessage = null) }
+
+        connectJob = viewModelScope.launch {
+            try {
+                val result = traktAuthService.startDeviceAuth()
+                _uiState.update { state ->
+                    if (result.isSuccess) {
+                        state.copy(
+                            isLoading = false,
+                            statusMessage = context.getString(R.string.trakt_status_enter_activation_code)
+                        )
+                    } else {
+                        state.copy(
+                            isLoading = false,
+                            errorMessage = result.exceptionOrNull()?.message
+                                ?: context.getString(R.string.trakt_error_failed_start)
+                        )
+                    }
+                }
+            } finally {
+                connectJob = null
+                _uiState.update { state ->
+                    if (state.isLoading) state.copy(isLoading = false) else state
                 }
             }
         }
@@ -159,12 +159,15 @@ class TraktViewModel @Inject constructor(
     }
 
     fun onCancelDeviceFlow() {
+        connectJob?.cancel()
+        connectJob = null
         viewModelScope.launch {
             pollJob?.cancel()
             traktAuthDataStore.clearDeviceFlow()
             _uiState.update {
                 it.copy(
                     mode = TraktConnectionMode.DISCONNECTED,
+                    isLoading = false,
                     isPolling = false,
                     statusMessage = null,
                     errorMessage = null
@@ -185,7 +188,7 @@ class TraktViewModel @Inject constructor(
                     isPolling = false,
                     isStatsLoading = false,
                     connectedStats = null,
-                    statusMessage = "Disconnected from Trakt"
+                    statusMessage = context.getString(R.string.trakt_status_disconnected)
                 )
             }
         }
@@ -193,7 +196,13 @@ class TraktViewModel @Inject constructor(
 
     fun onSyncNow() {
         viewModelScope.launch {
-            _uiState.update { it.copy(isLoading = true, errorMessage = null, statusMessage = "Syncing...") }
+            _uiState.update {
+                it.copy(
+                    isLoading = true,
+                    errorMessage = null,
+                    statusMessage = context.getString(R.string.trakt_status_syncing)
+                )
+            }
             traktProgressService.refreshNow()
             traktAuthService.fetchUserSettings()
             val stats = traktProgressService.getCachedStats(forceRefresh = true)
@@ -202,7 +211,7 @@ class TraktViewModel @Inject constructor(
                     isLoading = false,
                     isStatsLoading = false,
                     connectedStats = stats ?: it.connectedStats,
-                    statusMessage = "Sync completed"
+                    statusMessage = context.getString(R.string.trakt_status_sync_completed)
                 )
             }
         }
@@ -220,21 +229,31 @@ class TraktViewModel @Inject constructor(
         viewModelScope.launch {
             combine(
                 traktSettingsDataStore.continueWatchingDaysCap,
-                traktSettingsDataStore.showUnairedNextUp,
-                traktSettingsDataStore.watchProgressSource
-            ) { daysCap, showUnairedNextUp, watchProgressSource ->
-                Triple(daysCap, showUnairedNextUp, watchProgressSource)
-            }.collectLatest { (daysCap, showUnairedNextUp, watchProgressSource) ->
+                traktSettingsDataStore.showMetaComments,
+                traktSettingsDataStore.moreLikeThisSource
+            ) { daysCap, showMetaComments, moreLikeThisSource ->
+                SettingsSnapshot(
+                    continueWatchingDaysCap = daysCap,
+                    showMetaComments = showMetaComments,
+                    moreLikeThisSource = moreLikeThisSource
+                )
+            }.collectLatest { snapshot ->
                 _uiState.update {
                     it.copy(
-                        continueWatchingDaysCap = daysCap,
-                        showUnairedNextUp = showUnairedNextUp,
-                        watchProgressSource = watchProgressSource
+                        continueWatchingDaysCap = snapshot.continueWatchingDaysCap,
+                        showMetaComments = snapshot.showMetaComments,
+                        moreLikeThisSource = snapshot.moreLikeThisSource
                     )
                 }
             }
         }
     }
+
+    private data class SettingsSnapshot(
+        val continueWatchingDaysCap: Int,
+        val showMetaComments: Boolean,
+        val moreLikeThisSource: MoreLikeThisSourcePreference
+    )
 
     private fun applyAuthState(authState: TraktAuthState) {
         val expiresAtSeconds = (authState.createdAt ?: 0L) + (authState.expiresIn ?: 0)
@@ -245,6 +264,11 @@ class TraktViewModel @Inject constructor(
             !authState.deviceCode.isNullOrBlank() -> TraktConnectionMode.AWAITING_APPROVAL
             else -> TraktConnectionMode.DISCONNECTED
         }
+
+        val previousState = _uiState.value
+        val connectedIdentityChanged = mode == TraktConnectionMode.CONNECTED &&
+            previousState.mode == TraktConnectionMode.CONNECTED &&
+            previousState.username != authState.username
 
         _uiState.update { current ->
             current.copy(
@@ -257,12 +281,22 @@ class TraktViewModel @Inject constructor(
                 deviceCodeExpiresAtMillis = authState.expiresAt,
                 credentialsConfigured = traktAuthService.hasRequiredCredentials(),
                 isPolling = if (mode == TraktConnectionMode.CONNECTED) false else current.isPolling,
-                connectedStats = if (mode == TraktConnectionMode.CONNECTED) current.connectedStats else null,
-                isStatsLoading = if (mode == TraktConnectionMode.CONNECTED) current.isStatsLoading else false
+                connectedStats = if (mode == TraktConnectionMode.CONNECTED && !connectedIdentityChanged) {
+                    current.connectedStats
+                } else {
+                    null
+                },
+                isStatsLoading = if (mode == TraktConnectionMode.CONNECTED && !connectedIdentityChanged) {
+                    current.isStatsLoading
+                } else {
+                    false
+                }
             )
         }
 
-        if (mode == TraktConnectionMode.CONNECTED && lastMode == null) {
+        if (mode == TraktConnectionMode.CONNECTED && connectedIdentityChanged) {
+            loadConnectedStats(forceRefresh = true)
+        } else if (mode == TraktConnectionMode.CONNECTED && lastMode == null) {
             loadConnectedStats(forceRefresh = false)
         } else if (mode == TraktConnectionMode.CONNECTED &&
             (lastMode != TraktConnectionMode.CONNECTED || shouldAutoSyncNow())
@@ -330,7 +364,7 @@ class TraktViewModel @Inject constructor(
                     _uiState.update {
                         it.copy(
                             isPolling = false,
-                            errorMessage = "Device code expired. Start again.",
+                            errorMessage = context.getString(R.string.trakt_error_code_expired),
                             statusMessage = null
                         )
                     }
@@ -352,7 +386,7 @@ class TraktViewModel @Inject constructor(
                         _uiState.update {
                             it.copy(
                                 isPolling = false,
-                                errorMessage = "Device code already used. Start again.",
+                                errorMessage = context.getString(R.string.trakt_error_code_used),
                                 statusMessage = null
                             )
                         }
@@ -363,7 +397,7 @@ class TraktViewModel @Inject constructor(
                         _uiState.update {
                             it.copy(
                                 isPolling = false,
-                                errorMessage = "Device code expired. Start again.",
+                                errorMessage = context.getString(R.string.trakt_error_code_expired),
                                 statusMessage = null
                             )
                         }
@@ -374,7 +408,7 @@ class TraktViewModel @Inject constructor(
                         _uiState.update {
                             it.copy(
                                 isPolling = false,
-                                errorMessage = "Authorization denied on Trakt.",
+                                errorMessage = context.getString(R.string.trakt_error_denied),
                                 statusMessage = null
                             )
                         }
@@ -386,7 +420,7 @@ class TraktViewModel @Inject constructor(
                             it.copy(
                                 isPolling = true,
                                 pollIntervalSeconds = poll.pollIntervalSeconds,
-                                statusMessage = "Rate limited, slowing down polling..."
+                                statusMessage = context.getString(R.string.trakt_status_rate_limited_slowing_polling)
                             )
                         }
                     }
@@ -396,7 +430,10 @@ class TraktViewModel @Inject constructor(
                         _uiState.update {
                             it.copy(
                                 isPolling = false,
-                                statusMessage = "Connected as ${poll.username ?: "Trakt user"}",
+                                statusMessage = context.getString(
+                                    R.string.trakt_connected_as,
+                                    poll.username ?: context.getString(R.string.trakt_user_fallback)
+                                ),
                                 errorMessage = null
                             )
                         }

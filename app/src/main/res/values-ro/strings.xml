@@ -20,6 +20,13 @@
     <string name="cw_min_left">%1$dm rămase</string>
     <string name="cw_almost_done">Aproape gata</string>
     <string name="cw_airs_date">Difuzat %1$s</string>
+    <string name="cw_airs_today">Difuzat astăzi</string>
+    <string name="cw_airs_tomorrow">Difuzat mâine</string>
+    <plurals name="cw_airs_in_days">
+        <item quantity="one">Difuzat în %d zi</item>
+        <item quantity="few">Difuzat în %d zile</item>
+        <item quantity="other">Difuzat în %d de zile</item>
+    </plurals>
     <string name="cw_action_go_to_details">Accesează detalii</string>
     <string name="cw_action_start_from_beginning">Începe de la început</string>
     <string name="cw_action_remove">Elimină</string>
@@ -35,7 +42,7 @@
     <string name="hero_director">Director: %1$s</string>
     <string name="hero_writer">Scriitor: %1$s</string>
     <string name="hero_play">Redă</string>
-    <string name="hero_play_episode">Redă S%1$d, E%2$d</string>
+    <string name="hero_play_episode">Redă S%1$d E%2$d</string>
     <string name="hero_add_to_library">Adaugă în bibliotecă</string>
     <string name="hero_remove_from_library">Elimină din bibliotecă</string>
     <string name="hero_mark_watched">Marchează ca vizionat</string>
@@ -76,9 +83,9 @@
     <!-- MetaDetailsScreen -->
     <string name="detail_btn_play">Redă</string>
     <string name="detail_btn_resume">Continuă</string>
-    <string name="detail_btn_play_episode">Redă S%1$dE%2$d</string>
-    <string name="detail_btn_resume_episode">Continuă S%1$dE%2$d</string>
-    <string name="detail_btn_next_episode">Următorul S%1$dE%2$d</string>
+    <string name="detail_btn_play_episode">Redă S%1$d E%2$d</string>
+    <string name="detail_btn_resume_episode">Continuă S%1$d E%2$d</string>
+    <string name="detail_btn_next_episode">Următorul S%1$d E%2$d</string>
     <string name="detail_tab_cast">Creator și Distribuție</string>
     <string name="cast_role_creator">Creator</string>
     <string name="cast_role_director">Regizor</string>
@@ -116,29 +123,29 @@
 
     <!-- SettingsScreen categories -->
     <string name="settings_account">Cont</string>
-    <string name="settings_account_subtitle">Starea contului și sincronizării.</string>
+    <string name="settings_account_subtitle">Starea contului și sincronizării</string>
     <string name="settings_profiles">Profile</string>
-    <string name="settings_profiles_subtitle">Gestionează profilurile utilizatorilor.</string>
+    <string name="settings_profiles_subtitle">Gestionează profilurile utilizatorilor</string>
     <string name="settings_layout">Aranjament</string>
-    <string name="settings_layout_subtitle">Structura paginii principale și stilurile afișajului.</string>
+    <string name="settings_layout_subtitle">Structura paginii principale și stilurile afișajului</string>
     <string name="settings_plugins">Plugin-uri</string>
-    <string name="settings_plugins_subtitle">Depozite și furnizori.</string>
-    <string name="settings_integration">Integrare</string>
+    <string name="settings_plugins_subtitle">Depozite și furnizori</string>
+    <string name="settings_integration">Integrări</string>
     <string name="settings_playback">Redare</string>
-    <string name="settings_playback_subtitle">Player, subtitrări și redare automată.</string>
-    <string name="settings_trakt_subtitle">Deschide ecranul de conectare Trakt.</string>
-    <string name="settings_about_subtitle">Versiune și politici.</string>
+    <string name="settings_playback_subtitle">Player, subtitrări și redare automată</string>
+    <string name="settings_trakt_subtitle">Deschide ecranul de conectare Trakt</string>
+    <string name="settings_about_subtitle">Versiune și politici</string>
     <string name="settings_debug">Depanare</string>
-    <string name="settings_debug_subtitle">Instrumente pentru dezvoltatori și steaguri de funcționalitate.</string>
-    <string name="settings_plugins_section_subtitle">Gestionează depozitele, furnizorii și stările pluginurilor.</string>
-    <string name="settings_account_section_subtitle">Statutul contului și sincronizării.</string>
+    <string name="settings_debug_subtitle">Instrumente pentru dezvoltatori și steaguri de funcționalitate</string>
+    <string name="settings_plugins_section_subtitle">Gestionează depozitele, furnizorii și stările pluginurilor</string>
+    <string name="settings_account_section_subtitle">Statutul contului și sincronizării</string>
     <string name="account_stat_addons">add-on-uri</string>
     <string name="account_stat_plugins">pluginuri</string>
     <string name="account_stat_library">bibliotecă</string>
     <string name="account_stat_progress">progres</string>
     <string name="account_stat_watched">vizionate</string>
     <string name="settings_integrations_section">Integrări</string>
-    <string name="settings_integrations_section_subtitle">Alege setările TMDB sau MDBList</string>
+    <string name="settings_integrations_section_subtitle">Gestionați integrările disponibile</string>
     <string name="settings_tmdb_subtitle">Controale de îmbogățire a metadatelor</string>
     <string name="settings_mdblist_subtitle">Furnizori externi de evaluări</string>
 
@@ -170,8 +177,8 @@
     <string name="playback_player_ask">Întreabă de fiecare dată</string>
 
     <!-- PlaybackAudioSettings -->
-    <string name="playback_section_audio">Audio și trailer</string>
-    <string name="playback_section_audio_desc">Comportament trailer și controale audio.</string>
+    <string name="playback_section_audio">Audio și video</string>
+    <string name="playback_section_audio_desc">Controale audio și compatibilitate video.</string>
     <string name="playback_section_subtitles">Subtitrări</string>
     <string name="playback_section_subtitles_desc">Limbă, stil și mod de randare.</string>
     <string name="playback_afr_open">Deschis</string>
@@ -202,7 +209,6 @@
     <string name="audio_decoder_priority">Prioritate decodor</string>
     <string name="audio_tunneled">Redare prin tunel</string>
     <string name="audio_tunneled_sub">Sincronizare audio/video la nivel hardware. Poate îmbunătăți redarea pe unele dispozitive Android TV</string>
-    <string name="audio_dv_sub">Mapează Dolby Vision Profil 7 la HEVC standard pentru dispozitivele fără suport hardware DV</string>
     <string name="audio_decoder_device_only_desc">Folosește doar decodoarele hardware încorporate. Cele mai compatibile, dar s-ar putea să nu suporte toate formatele.</string>
     <string name="audio_decoder_prefer_device_desc">Folosește decodoarele hardware când sunt disponibile, revine la FFmpeg dacă nu. Recomandat pentru majoritatea dispozitivelor.</string>
     <string name="audio_decoder_prefer_app_desc">Folosește decodoarele FFmpeg când sunt disponibile. Compatibilitate mai bună a formatelor, dar consumă mai mult CPU.</string>
@@ -214,6 +220,10 @@
     <string name="sub_forced_lang">Forțat</string>
     <string name="sub_preferred_lang">Limba preferată</string>
     <string name="sub_secondary_lang">Limba preferată secundară</string>
+    <string name="sub_use_forced_subtitles">Folosește subtitrări forțate</string>
+    <string name="sub_use_forced_subtitles_desc">Preferă subtitrările forțate când sunetul corespunde limbii subtitrării; dacă nu sunt disponibile, nu selecta nimic</string>
+    <string name="sub_show_only_preferred_languages">Afișează doar limbile preferate</string>
+    <string name="sub_show_only_preferred_languages_desc">Ascunde toate celelalte limbi de subtitrare din lista de selecție</string>
     <string name="sub_organization">Organizarea subtitrărilor</string>
     <string name="sub_size">Dimensiune</string>
     <string name="sub_vertical_offset">Offset vertical</string>
@@ -482,7 +492,7 @@
 
     <!-- ProfileSettingsContent -->
     <string name="profile_title">Profiluri</string>
-    <string name="profile_subtitle">Gestionează profilurile utilizatorului pentru acest cont.</string>
+    <string name="profile_subtitle">Gestionează profilurile utilizatorului pentru acest cont</string>
     <string name="profile_primary_label">Principal</string>
     <string name="profile_shares_primary">Împărtășește %1$s al profilului principal</string>
     <string name="profile_edit_label">Editează</string>
@@ -629,7 +639,7 @@
     <string name="pause_back_to_details">Înapoi la detalii</string>
     <string name="pause_as_character">ca %1$s</string>
 
-    <!-- NextEpisodeCardOverlay -->
+    <!-- PostPlayOverlay -->
     <string name="next_episode_label">Următorul episod</string>
     <string name="next_episode_finding_source">Se caută sursa…</string>
     <string name="next_episode_playing_via">Se redă prin %1$s în %2$ds</string>
@@ -696,11 +706,9 @@
 
     <!-- AuthQrSignInScreen -->
     <string name="auth_qr_title">Autentificare cu QR</string>
-    <string name="auth_qr_account_login">Autentificare Cont</string>
     <string name="auth_qr_finishing">Se finalizează autentificarea\u2026</string>
     <string name="auth_qr_code_label">Cod: %1$s</string>
     <string name="auth_qr_expires">Expiră în %1$s</string>
-    <string name="auth_qr_phone_hint">Folosiți telefonul pentru a vă autentifica cu e‑mail/parolă. TV rămâne doar QR pentru o autentificare mai rapidă.</string>
     <string name="auth_qr_scan_instruction">Scanați QR, aprobați în browser, apoi reveniți aici.</string>
     <string name="auth_qr_code_display">Cod: %1$s</string>
     <string name="auth_qr_refresh">Reîmprospătează QR</string>
@@ -827,7 +835,6 @@
 
     <!-- PlaybackAudioSettings -->
     <string name="audio_passthrough_info">Passthrough audio (TrueHD, DTS, AC-3, etc.) este automat. Când este conectat la un receptor AV compatibil sau soundbar prin HDMI, audio lossless este trimis așa cum este, fără decodare.</string>
-    <string name="audio_dv_title">DV7 - HEVC rezervă</string>
 
     <!-- SidebarNavigation / MainActivity -->
     <string name="nav_home">Acasă</string>
@@ -842,4 +849,6 @@
     <string name="update_open_settings">Deschide Setările</string>
     <string name="update_install">Instalează</string>
     <string name="update_ignore">Ignoră</string>
-  </resources>
+      <string name="playback_player_auto">Automat (Cel mai bun pentru conținut)</string>
+    <string name="playback_player_auto_desc">ExoPlayer pentru Filme și Seriale · MPV pentru Anime</string>
+</resources>

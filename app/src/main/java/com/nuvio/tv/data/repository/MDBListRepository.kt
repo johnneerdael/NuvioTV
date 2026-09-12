@@ -41,7 +41,8 @@ class MDBListRepository @Inject constructor(
         LETTERBOXD("letterboxd"),
         TOMATOES("tomatoes"),
         AUDIENCE("audience"),
-        METACRITIC("metacritic")
+        METACRITIC("metacritic"),
+        MAL("mal")
     }
 
     private val tag = "MDBListRepository"
@@ -51,9 +52,75 @@ class MDBListRepository @Inject constructor(
     private val inFlightMutex = Mutex()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
+    /** Lightweight helper for home screen enrichment - fetches only the IMDb rating. */
+    suspend fun getImdbRatingForItem(itemId: String, itemType: String): Double? {
+        val settings = settingsDataStore.settings.first()
+        if (!settings.enabled) return null
+        val apiKey = settings.apiKey.trim()
+        if (apiKey.isBlank()) return null
+
+        val mediaType = normalizeMediaType(itemType)
+        val imdbId = resolveImdbId(
+            meta = Meta(
+                id = itemId,
+                type = when (normalizeMediaType(itemType)) {
+                    "show" -> com.nuvio.tv.domain.model.ContentType.SERIES
+                    else -> com.nuvio.tv.domain.model.ContentType.MOVIE
+                },
+                name = itemId,
+                poster = null,
+                posterShape = com.nuvio.tv.domain.model.PosterShape.POSTER,
+                background = null,
+                logo = null,
+                description = null,
+                releaseInfo = null,
+                imdbRating = null,
+                genres = emptyList(),
+                runtime = null,
+                director = emptyList(),
+                cast = emptyList(),
+                videos = emptyList(),
+                country = null,
+                awards = null,
+                language = null,
+                links = emptyList()
+            ),
+            fallbackItemId = itemId,
+            fallbackItemType = itemType,
+            mediaType = mediaType
+        ) ?: return null
+
+        val cacheKey = "$mediaType:$imdbId:imdb:${apiKey.hashCode()}"
+        val now = System.currentTimeMillis()
+        cache[cacheKey]?.let { cached ->
+            if (cached.expiresAtMs > now) return cached.result?.ratings?.imdb
+            cache.remove(cacheKey)
+        }
+
+        val deferred = inFlightMutex.withLock {
+            inFlight[cacheKey] ?: scope.async {
+                try {
+                    fetchRatings(
+                        imdbId = imdbId,
+                        mediaType = mediaType,
+                        apiKey = apiKey,
+                        providers = listOf(ProviderType.IMDB)
+                    ).also { result ->
+                        cache[cacheKey] = CacheEntry(
+                            result = result,
+                            expiresAtMs = System.currentTimeMillis() + cacheTtlMs
+                        )
+                    }
+                } finally {
+                    inFlightMutex.withLock { inFlight.remove(cacheKey) }
+                }
+            }.also { inFlight[cacheKey] = it }
+        }
+        return deferred.await()?.ratings?.imdb
+    }
+
     suspend fun getRatingsForMeta(
-        meta: Meta,
-        fallbackItemId: String,
+        meta: Meta,        fallbackItemId: String,
         fallbackItemType: String
     ): MDBListRatingsResult? {
         val settings = settingsDataStore.settings.first()
@@ -138,7 +205,8 @@ class MDBListRepository @Inject constructor(
             letterboxd = results[ProviderType.LETTERBOXD],
             tomatoes = results[ProviderType.TOMATOES],
             audience = results[ProviderType.AUDIENCE],
-            metacritic = results[ProviderType.METACRITIC]
+            metacritic = results[ProviderType.METACRITIC],
+            mal = results[ProviderType.MAL]
         )
 
         if (ratings.isEmpty()) return null
@@ -184,6 +252,7 @@ class MDBListRepository @Inject constructor(
         if (settings.showTomatoes) add(ProviderType.TOMATOES)
         if (settings.showAudience) add(ProviderType.AUDIENCE)
         if (settings.showMetacritic) add(ProviderType.METACRITIC)
+        if (settings.showMal) add(ProviderType.MAL)
     }
 
     private suspend fun resolveImdbId(

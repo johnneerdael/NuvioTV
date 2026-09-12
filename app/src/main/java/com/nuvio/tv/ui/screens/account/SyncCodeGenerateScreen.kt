@@ -2,6 +2,8 @@
 
 package com.nuvio.tv.ui.screens.account
 
+import com.nuvio.tv.ui.theme.NuvioTheme
+
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
@@ -35,7 +37,6 @@ import androidx.tv.material3.ButtonDefaults
 import androidx.tv.material3.ExperimentalTvMaterial3Api
 import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.Text
-import com.nuvio.tv.ui.theme.NuvioColors
 import androidx.compose.ui.res.stringResource
 import com.nuvio.tv.R
 
@@ -51,53 +52,51 @@ fun SyncCodeGenerateScreen(
     val keyboardController = LocalSoftwareKeyboardController.current
 
     Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(NuvioColors.Background),
+            modifier = Modifier.fillMaxSize(),
         contentAlignment = Alignment.Center
     ) {
         Column(
             modifier = Modifier
                 .fillMaxWidth(0.5f)
                 .background(
-                    color = NuvioColors.BackgroundElevated,
+                    color = NuvioTheme.colors.BackgroundElevated,
                     shape = RoundedCornerShape(20.dp)
                 )
-                .padding(32.dp),
+                .padding(NuvioTheme.spacing.xxl),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
             Text(
                 text = stringResource(R.string.sync_generate_title),
                 style = MaterialTheme.typography.headlineSmall,
-                color = NuvioColors.TextPrimary,
+                color = NuvioTheme.colors.TextPrimary,
                 fontWeight = FontWeight.SemiBold
             )
 
-            Spacer(modifier = Modifier.height(8.dp))
+            Spacer(modifier = Modifier.height(NuvioTheme.spacing.sm))
 
             Text(
                 text = stringResource(R.string.sync_generate_subtitle),
                 style = MaterialTheme.typography.bodyMedium,
-                color = NuvioColors.TextSecondary,
+                color = NuvioTheme.colors.TextSecondary,
                 textAlign = TextAlign.Center
             )
 
-            Spacer(modifier = Modifier.height(24.dp))
+            Spacer(modifier = Modifier.height(NuvioTheme.spacing.xl))
 
             if (uiState.generatedSyncCode != null) {
                 // Show the generated code
                 Text(
                     text = stringResource(R.string.sync_generate_code_label),
                     style = MaterialTheme.typography.labelMedium,
-                    color = NuvioColors.TextSecondary
+                    color = NuvioTheme.colors.TextSecondary
                 )
-                Spacer(modifier = Modifier.height(8.dp))
+                Spacer(modifier = Modifier.height(NuvioTheme.spacing.sm))
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
                         .background(
-                            color = NuvioColors.Secondary.copy(alpha = 0.1f),
-                            shape = RoundedCornerShape(12.dp)
+                            color = NuvioTheme.colors.Secondary.copy(alpha = 0.1f),
+                            shape = RoundedCornerShape(NuvioTheme.radii.md)
                         )
                         .padding(20.dp),
                     contentAlignment = Alignment.Center
@@ -108,44 +107,44 @@ fun SyncCodeGenerateScreen(
                             letterSpacing = 1.sp,
                             fontWeight = FontWeight.Bold
                         ),
-                        color = NuvioColors.Secondary,
+                        color = NuvioTheme.colors.Secondary,
                         textAlign = TextAlign.Center,
                         maxLines = 1
                     )
                 }
-                Spacer(modifier = Modifier.height(16.dp))
+                Spacer(modifier = Modifier.height(NuvioTheme.spacing.lg))
                 Text(
                     text = stringResource(R.string.sync_generate_instruction),
                     style = MaterialTheme.typography.bodySmall,
-                    color = NuvioColors.TextTertiary,
+                    color = NuvioTheme.colors.TextTertiary,
                     textAlign = TextAlign.Center
                 )
-                Spacer(modifier = Modifier.height(24.dp))
+                Spacer(modifier = Modifier.height(NuvioTheme.spacing.xl))
                 Button(
                     onClick = {
                         viewModel.clearGeneratedSyncCode()
                         onBackPress()
                     },
                     colors = ButtonDefaults.colors(
-                        containerColor = NuvioColors.Secondary,
-                        focusedContainerColor = NuvioColors.SecondaryVariant,
-                        contentColor = NuvioColors.OnSecondary,
-                        focusedContentColor = NuvioColors.OnSecondaryVariant
+                        containerColor = NuvioTheme.colors.Secondary,
+                        focusedContainerColor = NuvioTheme.colors.SecondaryVariant,
+                        contentColor = NuvioTheme.colors.OnSecondary,
+                        focusedContentColor = NuvioTheme.colors.OnSecondaryVariant
                     ),
                     shape = ButtonDefaults.shape(RoundedCornerShape(50)),
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    Text(stringResource(R.string.sync_generate_done), modifier = Modifier.padding(vertical = 4.dp))
+                    Text(stringResource(R.string.sync_generate_done), modifier = Modifier.padding(vertical = NuvioTheme.spacing.xs))
                 }
             } else {
                 // PIN input form
                 Text(
                     text = stringResource(R.string.sync_generate_pin_label),
                     style = MaterialTheme.typography.labelMedium,
-                    color = NuvioColors.TextSecondary,
+                    color = NuvioTheme.colors.TextSecondary,
                     modifier = Modifier.fillMaxWidth()
                 )
-                Spacer(modifier = Modifier.height(4.dp))
+                Spacer(modifier = Modifier.height(NuvioTheme.spacing.xs))
                 InputField(
                     value = pin,
                     onValueChange = { if (it.length <= 8) pin = it },
@@ -160,7 +159,7 @@ fun SyncCodeGenerateScreen(
                 )
 
                 if (uiState.error != null) {
-                    Spacer(modifier = Modifier.height(8.dp))
+                    Spacer(modifier = Modifier.height(NuvioTheme.spacing.sm))
                     Text(
                         text = uiState.error ?: "",
                         style = MaterialTheme.typography.bodySmall,
@@ -168,23 +167,23 @@ fun SyncCodeGenerateScreen(
                     )
                 }
 
-                Spacer(modifier = Modifier.height(24.dp))
+                Spacer(modifier = Modifier.height(NuvioTheme.spacing.xl))
 
                 Button(
                     onClick = { viewModel.generateSyncCode(pin) },
                     enabled = !uiState.isLoading && pin.length >= 4,
                     colors = ButtonDefaults.colors(
-                        containerColor = NuvioColors.Secondary,
-                        focusedContainerColor = NuvioColors.SecondaryVariant,
-                        contentColor = NuvioColors.OnSecondary,
-                        focusedContentColor = NuvioColors.OnSecondaryVariant
+                        containerColor = NuvioTheme.colors.Secondary,
+                        focusedContainerColor = NuvioTheme.colors.SecondaryVariant,
+                        contentColor = NuvioTheme.colors.OnSecondary,
+                        focusedContentColor = NuvioTheme.colors.OnSecondaryVariant
                     ),
                     shape = ButtonDefaults.shape(RoundedCornerShape(50)),
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Text(
-                        text = if (uiState.isLoading) "Generating..." else "Generate Code",
-                        modifier = Modifier.padding(vertical = 4.dp),
+                        text = if (uiState.isLoading) stringResource(R.string.sync_generate_generating) else stringResource(R.string.sync_generate_code_btn),
+                        modifier = Modifier.padding(vertical = NuvioTheme.spacing.xs),
                         fontWeight = FontWeight.Medium
                     )
                 }

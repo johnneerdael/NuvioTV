@@ -10,8 +10,8 @@ import com.nuvio.tv.domain.model.PosterShape
 import com.nuvio.tv.domain.model.Video
 
 fun MetaDto.toDomain(episodeLabel: String = "Episode"): Meta {
-    val directorMembers = mapPeople(appExtras?.directors, roleFallback = "Director")
-    val writerMembers = mapPeople(appExtras?.writers, roleFallback = "Writer")
+    val directorMembers = mapPeople(appExtras?.directors, roleFallback = "Director", forceRole = true)
+    val writerMembers = mapPeople(appExtras?.writers, roleFallback = "Writer", forceRole = true)
     val castMembers = mapPeople(appExtras?.cast)
     val directors = coerceStringList(director).ifEmpty { directorMembers.map { it.name } }
     val writersList = coerceStringList(writer).ifEmpty { coerceStringList(writers) }
@@ -45,7 +45,12 @@ fun MetaDto.toDomain(episodeLabel: String = "Episode"): Meta {
         videos = videos?.map { it.toDomain(episodeLabel) } ?: emptyList(),
         productionCompanies = emptyList(),
         networks = emptyList(),
-        ageRating = appExtras?.certification?.takeIf { it.isNotBlank() },
+        ageRating = listOf(
+            appExtras?.certificationLocal,
+            appExtras?.certification
+        ).firstNotNullOfOrNull { value ->
+            value?.trim()?.takeIf(String::isNotBlank)
+        },
         country = country,
         awards = awards,
         language = language,
@@ -75,6 +80,7 @@ fun VideoDto.toDomain(episodeLabel: String = "Episode"): Video {
         episode = episode ?: number,
         overview = overview ?: description,
         runtime = parseEpisodeRuntimeMinutes(runtime),
+        rating = rating?.trim()?.toDoubleOrNull()?.takeIf { it > 0.0 },
         available = available
     )
 }

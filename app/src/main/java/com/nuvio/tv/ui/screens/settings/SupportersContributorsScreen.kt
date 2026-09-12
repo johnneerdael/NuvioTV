@@ -2,12 +2,11 @@
 
 package com.nuvio.tv.ui.screens.settings
 
+import com.nuvio.tv.ui.theme.NuvioTheme
+
 import android.content.Intent
-import android.graphics.Bitmap
 import android.net.Uri
 import androidx.activity.compose.BackHandler
-import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -17,6 +16,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -24,8 +24,8 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -40,11 +40,9 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.focusRestorer
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -52,6 +50,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -67,32 +66,28 @@ import androidx.tv.material3.ExperimentalTvMaterial3Api
 import androidx.tv.material3.Icon
 import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.Text
-import coil.compose.AsyncImagePainter
-import coil.compose.rememberAsyncImagePainter
-import coil.request.ImageRequest
+import coil3.compose.AsyncImagePainter
+import coil3.compose.rememberAsyncImagePainter
+import coil3.request.ImageRequest
+import coil3.request.crossfade
 import com.nuvio.tv.BuildConfig
 import com.nuvio.tv.R
 import com.nuvio.tv.core.qr.QrCodeGenerator
+import com.nuvio.tv.data.repository.DevelopmentSponsor
 import com.nuvio.tv.data.repository.GitHubContributor
-import com.nuvio.tv.data.repository.SupporterDonation
+import com.nuvio.tv.data.repository.SupporterMember
+import com.nuvio.tv.domain.model.MemberTier
 import com.nuvio.tv.ui.components.NuvioDialog
 import com.nuvio.tv.ui.screens.detail.requestFocusAfterFrames
-import com.nuvio.tv.ui.theme.NuvioColors
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.Locale
 
-private val DONATIONS_URL: String
-    get() = BuildConfig.DONATIONS_BASE_URL
+private val SUPPORT_URL: String
+    get() = BuildConfig.SUPPORT_URL
         .takeIf { it.isNotBlank() }
-        ?: error("DONATIONS_BASE_URL is missing. Set it in local.properties or local.dev.properties.")
-        .removeSuffix("/")
-
-private val DONATE_URL: String
-    get() = BuildConfig.DONATIONS_DONATE_URL
-        .takeIf { it.isNotBlank() }
-        ?: error("DONATIONS_DONATE_URL is missing. Set it in local.properties or local.dev.properties.")
+        ?: error("SUPPORT_URL is missing. Set it in local.properties or local.dev.properties.")
         .removeSuffix("/")
 
 @Composable
@@ -100,32 +95,35 @@ fun SupportersContributorsScreen(
     viewModel: SupportersContributorsViewModel = hiltViewModel(),
     onBackPress: () -> Unit = {}
 ) {
-    var showDonateQr by remember { mutableStateOf(false) }
-    val donateFocusRequester = remember { FocusRequester() }
-    val backFocusRequester = remember { FocusRequester() }
-
-    BackHandler(enabled = showDonateQr) {
-        showDonateQr = false
-    }
+    var showMembershipQr by remember { mutableStateOf(false) }
+    val membershipActionFocusRequester = remember { FocusRequester() }
+    val membershipBackFocusRequester = remember { FocusRequester() }
 
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val tabFocusRequesters = remember {
         SupportersContributorsTab.entries.associateWith { FocusRequester() }
     }
     val supporterFocusRequesters = remember { mutableMapOf<String, FocusRequester>() }
+    val sponsorFocusRequesters = remember { mutableMapOf<String, FocusRequester>() }
     val contributorFocusRequesters = remember { mutableMapOf<String, FocusRequester>() }
     var pendingSupporterRestoreKey by remember { mutableStateOf<String?>(null) }
+    var pendingSponsorRestoreKey by remember { mutableStateOf<String?>(null) }
     var pendingContributorRestoreKey by remember { mutableStateOf<String?>(null) }
 
     BackHandler {
         when {
+            showMembershipQr -> showMembershipQr = false
             uiState.selectedContributor != null -> {
-                pendingContributorRestoreKey = uiState.selectedContributor?.login
+                pendingContributorRestoreKey = uiState.selectedContributor?.id
                 viewModel.dismissContributorDetails()
             }
             uiState.selectedSupporter != null -> {
                 pendingSupporterRestoreKey = uiState.selectedSupporter?.key
                 viewModel.dismissSupporterDetails()
+            }
+            uiState.selectedSponsor != null -> {
+                pendingSponsorRestoreKey = uiState.selectedSponsor?.id
+                viewModel.dismissSponsorDetails()
             }
             else -> onBackPress()
         }
@@ -139,8 +137,12 @@ fun SupportersContributorsScreen(
         supporterFocusRequesters.keys.retainAll(uiState.supporters.map { it.key }.toSet())
     }
 
+    LaunchedEffect(uiState.sponsors) {
+        sponsorFocusRequesters.keys.retainAll(uiState.sponsors.map { it.id }.toSet())
+    }
+
     LaunchedEffect(uiState.contributors) {
-        contributorFocusRequesters.keys.retainAll(uiState.contributors.map { it.login }.toSet())
+        contributorFocusRequesters.keys.retainAll(uiState.contributors.map { it.id }.toSet())
     }
 
     LaunchedEffect(uiState.selectedSupporter, pendingSupporterRestoreKey) {
@@ -148,6 +150,13 @@ fun SupportersContributorsScreen(
         if (uiState.selectedSupporter != null) return@LaunchedEffect
         supporterFocusRequesters[key]?.requestFocusAfterFrames()
         pendingSupporterRestoreKey = null
+    }
+
+    LaunchedEffect(uiState.selectedSponsor, pendingSponsorRestoreKey) {
+        val key = pendingSponsorRestoreKey ?: return@LaunchedEffect
+        if (uiState.selectedSponsor != null) return@LaunchedEffect
+        sponsorFocusRequesters[key]?.requestFocusAfterFrames()
+        pendingSponsorRestoreKey = null
     }
 
     LaunchedEffect(uiState.selectedContributor, pendingContributorRestoreKey) {
@@ -160,34 +169,43 @@ fun SupportersContributorsScreen(
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(NuvioColors.Background)
             .padding(horizontal = 36.dp, vertical = 28.dp)
     ) {
         Row(
             modifier = Modifier.fillMaxSize(),
-            horizontalArrangement = Arrangement.spacedBy(24.dp)
+            horizontalArrangement = Arrangement.spacedBy(NuvioTheme.spacing.xl)
         ) {
-            SupportersBrandColumn(
-                modifier = Modifier.weight(0.42f),
-                donateFocusRequester = donateFocusRequester,
-                backFocusRequester = backFocusRequester,
-                showDonateQr = showDonateQr,
-                onShowDonateQr = { showDonateQr = true },
-                onHideDonateQr = { showDonateQr = false }
+            SupporterMembershipPanel(
+                state = uiState.membership,
+                supportUrl = SUPPORT_URL,
+                modifier = Modifier.weight(0.35f),
+                actionFocusRequester = membershipActionFocusRequester,
+                backFocusRequester = membershipBackFocusRequester,
+                showQr = showMembershipQr,
+                onShowQr = { showMembershipQr = true },
+                onHideQr = { showMembershipQr = false },
+                onRefresh = viewModel::refreshMembership
             )
 
             SupportersContentPanel(
                 uiState = uiState,
-                leftFocusRequester = if (showDonateQr) backFocusRequester else donateFocusRequester,
+                leftFocusRequester = if (showMembershipQr) {
+                    membershipBackFocusRequester
+                } else {
+                    membershipActionFocusRequester
+                },
                 tabFocusRequesters = tabFocusRequesters,
                 supporterFocusRequesters = supporterFocusRequesters,
+                sponsorFocusRequesters = sponsorFocusRequesters,
                 contributorFocusRequesters = contributorFocusRequesters,
                 onSelectTab = viewModel::onSelectTab,
                 onRetrySupporters = viewModel::retrySupporters,
+                onRetrySponsors = viewModel::retrySponsors,
                 onRetryContributors = viewModel::retryContributors,
                 onSupporterClick = viewModel::onSupporterSelected,
+                onSponsorClick = viewModel::onSponsorSelected,
                 onContributorClick = viewModel::onContributorSelected,
-                modifier = Modifier.weight(0.58f)
+                modifier = Modifier.weight(0.65f)
             )
         }
     }
@@ -202,216 +220,24 @@ fun SupportersContributorsScreen(
         )
     }
 
+    uiState.selectedSponsor?.let { sponsor ->
+        SponsorDetailsDialog(
+            sponsor = sponsor,
+            onDismiss = {
+                pendingSponsorRestoreKey = sponsor.id
+                viewModel.dismissSponsorDetails()
+            }
+        )
+    }
+
     uiState.selectedContributor?.let { contributor ->
         ContributorDetailsDialog(
             contributor = contributor,
             onDismiss = {
-                pendingContributorRestoreKey = contributor.login
+                pendingContributorRestoreKey = contributor.id
                 viewModel.dismissContributorDetails()
             }
         )
-    }
-}
-
-@Composable
-private fun SupportersBrandColumn(
-    modifier: Modifier = Modifier,
-    donateFocusRequester: FocusRequester,
-    backFocusRequester: FocusRequester,
-    showDonateQr: Boolean,
-    onShowDonateQr: () -> Unit,
-    onHideDonateQr: () -> Unit
-) {
-    var hasShownDonateQr by remember { mutableStateOf(false) }
-    val qrBitmap = remember(DONATE_URL) {
-        runCatching { QrCodeGenerator.generate(DONATE_URL, 420) }.getOrNull()
-    }
-    val rotation by animateFloatAsState(
-        targetValue = if (showDonateQr) 180f else 0f,
-        animationSpec = tween(durationMillis = 480),
-        label = "supportersDonateFlip"
-    )
-
-    LaunchedEffect(showDonateQr) {
-        if (showDonateQr) {
-            hasShownDonateQr = true
-            backFocusRequester.requestFocusAfterFrames()
-        } else if (hasShownDonateQr) {
-            donateFocusRequester.requestFocusAfterFrames()
-        }
-    }
-
-    Box(
-        modifier = modifier
-            .fillMaxSize()
-            .clip(RoundedCornerShape(28.dp))
-            .background(NuvioColors.BackgroundElevated)
-            .border(1.dp, NuvioColors.Border, RoundedCornerShape(28.dp))
-            .padding(horizontal = 28.dp, vertical = 32.dp)
-    ) {
-        SupportersBrandFront(
-            donateFocusRequester = donateFocusRequester,
-            onShowDonateQr = onShowDonateQr,
-            modifier = Modifier
-                .fillMaxSize()
-                .graphicsLayer {
-                    rotationY = rotation
-                    cameraDistance = 18f * density
-                    alpha = if (rotation <= 90f) 1f else 0f
-                }
-        )
-
-        SupportersBrandBack(
-            qrBitmap = qrBitmap,
-            backFocusRequester = backFocusRequester,
-            onHideDonateQr = onHideDonateQr,
-            modifier = Modifier
-                .fillMaxSize()
-                .graphicsLayer {
-                    rotationY = rotation - 180f
-                    cameraDistance = 18f * density
-                    alpha = if (rotation > 90f) 1f else 0f
-                }
-        )
-    }
-}
-
-@Composable
-private fun SupportersBrandFront(
-    donateFocusRequester: FocusRequester,
-    onShowDonateQr: () -> Unit,
-    modifier: Modifier = Modifier
-) {
-    Column(
-        modifier = modifier,
-        verticalArrangement = Arrangement.Center
-    ) {
-        Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
-            Image(
-                painter = painterResource(id = R.drawable.app_logo_wordmark),
-                contentDescription = "NuvioTV",
-                modifier = Modifier
-                    .fillMaxWidth(0.78f)
-                    .height(86.dp),
-                contentScale = ContentScale.Fit
-            )
-
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text(
-                    text = stringResource(R.string.supporters_contributors_title),
-                    style = MaterialTheme.typography.headlineSmall,
-                    color = NuvioColors.TextPrimary,
-                    fontWeight = FontWeight.SemiBold
-                )
-
-                Text(
-                    text = stringResource(R.string.supporters_contributors_subtitle),
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = NuvioColors.TextSecondary
-                )
-            }
-
-            Text(
-                text = stringResource(R.string.supporters_contributors_supporters_copy),
-                style = MaterialTheme.typography.bodyMedium,
-                color = NuvioColors.TextPrimary.copy(alpha = 0.92f)
-            )
-
-            Text(
-                text = stringResource(R.string.supporters_contributors_donate_copy),
-                style = MaterialTheme.typography.bodyMedium,
-                color = NuvioColors.TextSecondary
-            )
-        }
-
-        Spacer(modifier = Modifier.weight(1f))
-
-        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Button(
-                onClick = onShowDonateQr,
-                modifier = Modifier
-                    .focusRequester(donateFocusRequester)
-                    .fillMaxWidth(),
-                colors = ButtonDefaults.colors(
-                    containerColor = NuvioColors.Secondary,
-                    focusedContainerColor = NuvioColors.SecondaryVariant,
-                    contentColor = NuvioColors.OnSecondary,
-                    focusedContentColor = NuvioColors.OnSecondaryVariant
-                ),
-                shape = ButtonDefaults.shape(RoundedCornerShape(50))
-            ) {
-                Text(
-                    text = stringResource(R.string.supporters_contributors_donate_button),
-                    modifier = Modifier.padding(vertical = 4.dp),
-                    fontWeight = FontWeight.SemiBold
-                )
-            }
-        }
-    }
-}
-
-@Composable
-private fun SupportersBrandBack(
-    qrBitmap: Bitmap?,
-    backFocusRequester: FocusRequester,
-    onHideDonateQr: () -> Unit,
-    modifier: Modifier = Modifier
-) {
-    Column(
-        modifier = modifier,
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center
-    ) {
-        Text(
-            text = stringResource(R.string.supporters_contributors_qr_title),
-            style = MaterialTheme.typography.headlineSmall,
-            color = NuvioColors.TextPrimary,
-            fontWeight = FontWeight.SemiBold,
-            textAlign = TextAlign.Center
-        )
-
-        Spacer(modifier = Modifier.height(10.dp))
-
-        Text(
-            text = stringResource(R.string.supporters_contributors_qr_subtitle),
-            style = MaterialTheme.typography.bodyMedium,
-            color = NuvioColors.TextSecondary,
-            textAlign = TextAlign.Center
-        )
-
-        Spacer(modifier = Modifier.height(22.dp))
-
-        if (qrBitmap != null) {
-            Image(
-                bitmap = qrBitmap.asImageBitmap(),
-                contentDescription = "Donation QR code",
-                modifier = Modifier
-                    .size(220.dp)
-                    .clip(RoundedCornerShape(24.dp))
-            )
-        }
-
-        Spacer(modifier = Modifier.height(18.dp))
-
-        Button(
-            onClick = onHideDonateQr,
-            modifier = Modifier
-                .focusRequester(backFocusRequester)
-                .fillMaxWidth(),
-            colors = ButtonDefaults.colors(
-                containerColor = NuvioColors.BackgroundCard,
-                focusedContainerColor = NuvioColors.FocusBackground,
-                contentColor = NuvioColors.TextPrimary,
-                focusedContentColor = NuvioColors.Primary
-            ),
-            shape = ButtonDefaults.shape(RoundedCornerShape(50))
-        ) {
-            Text(
-                text = stringResource(R.string.supporters_contributors_back_button),
-                modifier = Modifier.padding(vertical = 4.dp),
-                fontWeight = FontWeight.Medium
-            )
-        }
     }
 }
 
@@ -421,11 +247,14 @@ private fun SupportersContentPanel(
     leftFocusRequester: FocusRequester,
     tabFocusRequesters: Map<SupportersContributorsTab, FocusRequester>,
     supporterFocusRequesters: MutableMap<String, FocusRequester>,
+    sponsorFocusRequesters: MutableMap<String, FocusRequester>,
     contributorFocusRequesters: MutableMap<String, FocusRequester>,
     onSelectTab: (SupportersContributorsTab) -> Unit,
     onRetrySupporters: () -> Unit,
+    onRetrySponsors: () -> Unit,
     onRetryContributors: () -> Unit,
-    onSupporterClick: (SupporterDonation) -> Unit,
+    onSupporterClick: (SupporterMember) -> Unit,
+    onSponsorClick: (DevelopmentSponsor) -> Unit,
     onContributorClick: (GitHubContributor) -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -435,16 +264,16 @@ private fun SupportersContentPanel(
         modifier = modifier
             .fillMaxSize()
             .clip(RoundedCornerShape(28.dp))
-            .background(NuvioColors.BackgroundElevated)
-            .border(1.dp, NuvioColors.Border, RoundedCornerShape(28.dp))
-            .padding(24.dp),
+            .background(NuvioTheme.colors.BackgroundElevated)
+            .border(NuvioTheme.spacing.hairline, NuvioTheme.colors.Border, RoundedCornerShape(28.dp))
+            .padding(NuvioTheme.spacing.xl),
         verticalArrangement = Arrangement.spacedBy(18.dp)
     ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .focusRestorer(selectedTabRequester),
-            horizontalArrangement = Arrangement.spacedBy(12.dp)
+            horizontalArrangement = Arrangement.spacedBy(NuvioTheme.spacing.md)
         ) {
             SupportersTabButton(
                 label = stringResource(R.string.supporters_tab),
@@ -452,6 +281,13 @@ private fun SupportersContentPanel(
                 leftFocusRequester = leftFocusRequester,
                 focusRequester = tabFocusRequesters.getValue(SupportersContributorsTab.Supporters),
                 onClick = { onSelectTab(SupportersContributorsTab.Supporters) }
+            )
+            SupportersTabButton(
+                label = stringResource(R.string.sponsors_tab),
+                selected = uiState.selectedTab == SupportersContributorsTab.Sponsors,
+                leftFocusRequester = null,
+                focusRequester = tabFocusRequesters.getValue(SupportersContributorsTab.Sponsors),
+                onClick = { onSelectTab(SupportersContributorsTab.Sponsors) }
             )
             SupportersTabButton(
                 label = stringResource(R.string.contributors_tab),
@@ -470,6 +306,15 @@ private fun SupportersContentPanel(
                 supporterFocusRequesters = supporterFocusRequesters,
                 onRetry = onRetrySupporters,
                 onSupporterClick = onSupporterClick,
+                modifier = Modifier.weight(1f)
+            )
+            SupportersContributorsTab.Sponsors -> SponsorsTabContent(
+                uiState = uiState,
+                leftFocusRequester = leftFocusRequester,
+                upFocusRequester = selectedTabRequester,
+                sponsorFocusRequesters = sponsorFocusRequesters,
+                onRetry = onRetrySponsors,
+                onSponsorClick = onSponsorClick,
                 modifier = Modifier.weight(1f)
             )
             SupportersContributorsTab.Contributors -> ContributorsTabContent(
@@ -492,15 +337,15 @@ private fun SupportersTabContent(
     upFocusRequester: FocusRequester,
     supporterFocusRequesters: MutableMap<String, FocusRequester>,
     onRetry: () -> Unit,
-    onSupporterClick: (SupporterDonation) -> Unit,
+    onSupporterClick: (SupporterMember) -> Unit,
     modifier: Modifier = Modifier
 ) {
     Box(
         modifier = modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(24.dp))
-            .background(NuvioColors.Background)
-            .border(1.dp, NuvioColors.Border, RoundedCornerShape(24.dp))
+            .clip(RoundedCornerShape(NuvioTheme.spacing.xl))
+            .background(NuvioTheme.colors.Background)
+            .border(NuvioTheme.spacing.hairline, NuvioTheme.colors.Border, RoundedCornerShape(NuvioTheme.spacing.xl))
     ) {
         when {
             uiState.isSupportersLoading -> CenterStatusText(
@@ -525,14 +370,16 @@ private fun SupportersTabContent(
                 val firstRequester = uiState.supporters.firstOrNull()?.let { supporter ->
                     supporterFocusRequesters.getOrPut(supporter.key) { FocusRequester() }
                 } ?: FocusRequester()
+                val supportersListState = rememberLazyListState()
 
                 LazyColumn(
+                    state = supportersListState,
                     modifier = Modifier
                         .fillMaxSize()
                         .padding(14.dp)
                         .focusRestorer(firstRequester),
-                    verticalArrangement = Arrangement.spacedBy(12.dp),
-                    contentPadding = PaddingValues(top = 6.dp, bottom = 8.dp)
+                    verticalArrangement = Arrangement.spacedBy(NuvioTheme.spacing.md),
+                    contentPadding = PaddingValues(top = 6.dp, bottom = NuvioTheme.spacing.sm)
                 ) {
                     items(uiState.supporters, key = { it.key }) { supporter ->
                         val requester = remember(supporter.key) {
@@ -548,6 +395,78 @@ private fun SupportersTabContent(
                         )
                     }
                 }
+                SettingsVerticalScrollIndicators(state = supportersListState)
+            }
+        }
+    }
+}
+
+@Composable
+private fun SponsorsTabContent(
+    uiState: SupportersContributorsUiState,
+    leftFocusRequester: FocusRequester,
+    upFocusRequester: FocusRequester,
+    sponsorFocusRequesters: MutableMap<String, FocusRequester>,
+    onRetry: () -> Unit,
+    onSponsorClick: (DevelopmentSponsor) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Box(
+        modifier = modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(NuvioTheme.spacing.xl))
+            .background(NuvioTheme.colors.Background)
+            .border(NuvioTheme.spacing.hairline, NuvioTheme.colors.Border, RoundedCornerShape(NuvioTheme.spacing.xl))
+    ) {
+        when {
+            uiState.isSponsorsLoading -> CenterStatusText(
+                text = stringResource(R.string.sponsors_loading),
+                modifier = Modifier.fillMaxSize()
+            )
+
+            uiState.sponsorsErrorMessage != null -> TabErrorState(
+                title = stringResource(R.string.sponsors_error_title),
+                message = uiState.sponsorsErrorMessage,
+                leftFocusRequester = leftFocusRequester,
+                onRetry = onRetry,
+                modifier = Modifier.fillMaxSize()
+            )
+
+            uiState.hasLoadedSponsors && uiState.sponsors.isEmpty() -> CenterStatusText(
+                text = stringResource(R.string.sponsors_empty),
+                modifier = Modifier.fillMaxSize()
+            )
+
+            else -> {
+                val firstRequester = uiState.sponsors.firstOrNull()?.let { sponsor ->
+                    sponsorFocusRequesters.getOrPut(sponsor.id) { FocusRequester() }
+                } ?: FocusRequester()
+                val sponsorsListState = rememberLazyListState()
+
+                LazyColumn(
+                    state = sponsorsListState,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(14.dp)
+                        .focusRestorer(firstRequester),
+                    verticalArrangement = Arrangement.spacedBy(NuvioTheme.spacing.md),
+                    contentPadding = PaddingValues(top = 6.dp, bottom = NuvioTheme.spacing.sm)
+                ) {
+                    items(uiState.sponsors, key = { it.id }) { sponsor ->
+                        val requester = remember(sponsor.id) {
+                            sponsorFocusRequesters.getOrPut(sponsor.id) { FocusRequester() }
+                        }
+                        val isFirstItem = sponsor.id == uiState.sponsors.firstOrNull()?.id
+                        SponsorCard(
+                            sponsor = sponsor,
+                            focusRequester = requester,
+                            leftFocusRequester = leftFocusRequester,
+                            upFocusRequester = if (isFirstItem) upFocusRequester else null,
+                            onClick = { onSponsorClick(sponsor) }
+                        )
+                    }
+                }
+                SettingsVerticalScrollIndicators(state = sponsorsListState)
             }
         }
     }
@@ -566,9 +485,9 @@ private fun ContributorsTabContent(
     Box(
         modifier = modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(24.dp))
-            .background(NuvioColors.Background)
-            .border(1.dp, NuvioColors.Border, RoundedCornerShape(24.dp))
+            .clip(RoundedCornerShape(NuvioTheme.spacing.xl))
+            .background(NuvioTheme.colors.Background)
+            .border(NuvioTheme.spacing.hairline, NuvioTheme.colors.Border, RoundedCornerShape(NuvioTheme.spacing.xl))
     ) {
         when {
             uiState.isContributorsLoading -> CenterStatusText(
@@ -591,22 +510,24 @@ private fun ContributorsTabContent(
 
             else -> {
                 val firstRequester = uiState.contributors.firstOrNull()?.let { contributor ->
-                    contributorFocusRequesters.getOrPut(contributor.login) { FocusRequester() }
+                    contributorFocusRequesters.getOrPut(contributor.id) { FocusRequester() }
                 } ?: FocusRequester()
+                val contributorsListState = rememberLazyListState()
 
                 LazyColumn(
+                    state = contributorsListState,
                     modifier = Modifier
                         .fillMaxSize()
                         .padding(14.dp)
                         .focusRestorer(firstRequester),
-                    verticalArrangement = Arrangement.spacedBy(12.dp),
-                    contentPadding = PaddingValues(top = 6.dp, bottom = 8.dp)
+                    verticalArrangement = Arrangement.spacedBy(NuvioTheme.spacing.md),
+                    contentPadding = PaddingValues(top = 6.dp, bottom = NuvioTheme.spacing.sm)
                 ) {
-                    items(uiState.contributors, key = { it.login }) { contributor ->
-                        val requester = remember(contributor.login) {
-                            contributorFocusRequesters.getOrPut(contributor.login) { FocusRequester() }
+                    items(uiState.contributors, key = { it.id }) { contributor ->
+                        val requester = remember(contributor.id) {
+                            contributorFocusRequesters.getOrPut(contributor.id) { FocusRequester() }
                         }
-                        val isFirstItem = contributor.login == uiState.contributors.firstOrNull()?.login
+                        val isFirstItem = contributor.id == uiState.contributors.firstOrNull()?.id
                         ContributorCard(
                             contributor = contributor,
                             focusRequester = requester,
@@ -616,6 +537,7 @@ private fun ContributorsTabContent(
                         )
                     }
                 }
+                SettingsVerticalScrollIndicators(state = contributorsListState)
             }
         }
     }
@@ -633,7 +555,7 @@ private fun CenterStatusText(
         Text(
             text = text,
             style = MaterialTheme.typography.bodyMedium,
-            color = NuvioColors.TextSecondary,
+            color = NuvioTheme.colors.TextSecondary,
             textAlign = TextAlign.Center
         )
     }
@@ -654,7 +576,7 @@ private fun TabErrorState(
     }
 
     Box(
-        modifier = modifier.padding(24.dp),
+        modifier = modifier.padding(NuvioTheme.spacing.xl),
         contentAlignment = Alignment.Center
     ) {
         Column(
@@ -664,13 +586,13 @@ private fun TabErrorState(
             Text(
                 text = title,
                 style = MaterialTheme.typography.titleLarge,
-                color = NuvioColors.TextPrimary,
+                color = NuvioTheme.colors.TextPrimary,
                 textAlign = TextAlign.Center
             )
             Text(
                 text = message,
                 style = MaterialTheme.typography.bodyMedium,
-                color = NuvioColors.TextSecondary,
+                color = NuvioTheme.colors.TextSecondary,
                 textAlign = TextAlign.Center
             )
             Button(
@@ -679,10 +601,10 @@ private fun TabErrorState(
                     .focusRequester(retryFocusRequester)
                     .focusProperties { left = leftFocusRequester },
                 colors = ButtonDefaults.colors(
-                    containerColor = NuvioColors.Secondary,
-                    focusedContainerColor = NuvioColors.SecondaryVariant,
-                    contentColor = NuvioColors.OnSecondary,
-                    focusedContentColor = NuvioColors.OnSecondaryVariant
+                    containerColor = NuvioTheme.colors.Secondary,
+                    focusedContainerColor = NuvioTheme.colors.SecondaryVariant,
+                    contentColor = NuvioTheme.colors.OnSecondary,
+                    focusedContentColor = NuvioTheme.colors.OnSecondaryVariant
                 ),
                 shape = ButtonDefaults.shape(RoundedCornerShape(50))
             ) {
@@ -694,7 +616,7 @@ private fun TabErrorState(
 
 @Composable
 private fun SupporterCard(
-    supporter: SupporterDonation,
+    supporter: SupporterMember,
     focusRequester: FocusRequester,
     leftFocusRequester: FocusRequester,
     upFocusRequester: FocusRequester?,
@@ -713,16 +635,16 @@ private fun SupporterCard(
             }
             .onFocusChanged { isFocused = it.isFocused },
         colors = CardDefaults.colors(
-            containerColor = NuvioColors.BackgroundCard,
-            focusedContainerColor = NuvioColors.BackgroundCard
+            containerColor = NuvioTheme.colors.BackgroundCard,
+            focusedContainerColor = NuvioTheme.colors.BackgroundCard
         ),
         border = CardDefaults.border(
             border = Border(
-                border = BorderStroke(1.dp, NuvioColors.Border),
+                border = BorderStroke(NuvioTheme.spacing.hairline, NuvioTheme.colors.Border),
                 shape = RoundedCornerShape(22.dp)
             ),
             focusedBorder = Border(
-                border = BorderStroke(2.dp, NuvioColors.FocusRing),
+                border = NuvioTheme.focusRing.border(NuvioTheme.spacing.xxs),
                 shape = RoundedCornerShape(22.dp)
             )
         ),
@@ -732,12 +654,13 @@ private fun SupporterCard(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 18.dp, vertical = 16.dp),
+                .padding(horizontal = 18.dp, vertical = NuvioTheme.spacing.lg),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(16.dp)
+            horizontalArrangement = Arrangement.spacedBy(NuvioTheme.spacing.lg)
         ) {
-            NameAvatar(
+            PersonAvatar(
                 label = supporter.name,
+                avatarUrl = supporter.avatarUrl,
                 modifier = Modifier.size(58.dp)
             )
 
@@ -745,29 +668,25 @@ private fun SupporterCard(
                 Text(
                     text = supporter.name,
                     style = MaterialTheme.typography.titleMedium,
-                    color = NuvioColors.TextPrimary,
+                    color = NuvioTheme.colors.TextPrimary,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
-                Spacer(modifier = Modifier.height(4.dp))
+                Spacer(modifier = Modifier.height(NuvioTheme.spacing.xs))
                 Text(
-                    text = formatDonationDate(supporter.date),
+                    text = supporterTierLabel(supporter.membershipLevel),
                     style = MaterialTheme.typography.bodyMedium,
-                    color = NuvioColors.TextSecondary,
+                    color = NuvioTheme.colors.TextSecondary,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
-                supporter.message?.let { message ->
-                    Spacer(modifier = Modifier.height(4.dp))
+                formatSupporterDate(supporter.supporterSince)?.let { date ->
+                    Spacer(modifier = Modifier.height(NuvioTheme.spacing.xs))
                     Text(
-                        text = message,
+                        text = stringResource(R.string.supporters_since, date),
                         style = MaterialTheme.typography.bodySmall,
-                        color = if (isFocused) {
-                            NuvioColors.TextPrimary.copy(alpha = 0.9f)
-                        } else {
-                            NuvioColors.TextSecondary
-                        },
-                        maxLines = 2,
+                        color = NuvioTheme.colors.TextSecondary,
+                        maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
                 }
@@ -776,7 +695,76 @@ private fun SupporterCard(
             Icon(
                 imageVector = Icons.AutoMirrored.Filled.OpenInNew,
                 contentDescription = null,
-                tint = if (isFocused) NuvioColors.FocusRing else NuvioColors.TextTertiary,
+                tint = if (isFocused) NuvioTheme.colors.FocusRing else NuvioTheme.colors.TextTertiary,
+                modifier = Modifier.size(20.dp)
+            )
+        }
+    }
+}
+
+@Composable
+private fun SponsorCard(
+    sponsor: DevelopmentSponsor,
+    focusRequester: FocusRequester,
+    leftFocusRequester: FocusRequester,
+    upFocusRequester: FocusRequester?,
+    onClick: () -> Unit
+) {
+    var isFocused by remember { mutableStateOf(false) }
+
+    Card(
+        onClick = onClick,
+        modifier = Modifier
+            .fillMaxWidth()
+            .focusRequester(focusRequester)
+            .focusProperties {
+                left = leftFocusRequester
+                if (upFocusRequester != null) up = upFocusRequester
+            }
+            .onFocusChanged { isFocused = it.isFocused },
+        colors = CardDefaults.colors(
+            containerColor = NuvioTheme.colors.BackgroundCard,
+            focusedContainerColor = NuvioTheme.colors.BackgroundCard
+        ),
+        border = CardDefaults.border(
+            border = Border(
+                border = BorderStroke(NuvioTheme.spacing.hairline, NuvioTheme.colors.Border),
+                shape = RoundedCornerShape(22.dp)
+            ),
+            focusedBorder = Border(
+                border = NuvioTheme.focusRing.border(NuvioTheme.spacing.xxs),
+                shape = RoundedCornerShape(22.dp)
+            )
+        ),
+        shape = CardDefaults.shape(RoundedCornerShape(22.dp)),
+        scale = CardDefaults.scale(focusedScale = 1.02f, pressedScale = 1f)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 18.dp, vertical = NuvioTheme.spacing.lg),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(NuvioTheme.spacing.lg)
+        ) {
+            NameAvatar(
+                label = sponsor.name,
+                modifier = Modifier.size(58.dp)
+            )
+
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = sponsor.name,
+                    style = MaterialTheme.typography.titleMedium,
+                    color = NuvioTheme.colors.TextPrimary,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+
+            Icon(
+                imageVector = Icons.AutoMirrored.Filled.OpenInNew,
+                contentDescription = null,
+                tint = if (isFocused) NuvioTheme.colors.FocusRing else NuvioTheme.colors.TextTertiary,
                 modifier = Modifier.size(20.dp)
             )
         }
@@ -804,16 +792,16 @@ private fun ContributorCard(
             }
             .onFocusChanged { isFocused = it.isFocused },
         colors = CardDefaults.colors(
-            containerColor = NuvioColors.BackgroundCard,
-            focusedContainerColor = NuvioColors.BackgroundCard
+            containerColor = NuvioTheme.colors.BackgroundCard,
+            focusedContainerColor = NuvioTheme.colors.BackgroundCard
         ),
         border = CardDefaults.border(
             border = Border(
-                border = BorderStroke(1.dp, NuvioColors.Border),
+                border = BorderStroke(NuvioTheme.spacing.hairline, NuvioTheme.colors.Border),
                 shape = RoundedCornerShape(22.dp)
             ),
             focusedBorder = Border(
-                border = BorderStroke(2.dp, NuvioColors.FocusRing),
+                border = NuvioTheme.focusRing.border(NuvioTheme.spacing.xxs),
                 shape = RoundedCornerShape(22.dp)
             )
         ),
@@ -823,12 +811,12 @@ private fun ContributorCard(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 18.dp, vertical = 16.dp),
+                .padding(horizontal = 18.dp, vertical = NuvioTheme.spacing.lg),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(16.dp)
+            horizontalArrangement = Arrangement.spacedBy(NuvioTheme.spacing.lg)
         ) {
-            ContributorAvatar(
-                login = contributor.login,
+            PersonAvatar(
+                label = contributor.name,
                 avatarUrl = contributor.avatarUrl,
                 modifier = Modifier.size(58.dp)
             )
@@ -836,40 +824,25 @@ private fun ContributorCard(
             Column(modifier = Modifier.weight(1f)) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    horizontalArrangement = Arrangement.spacedBy(NuvioTheme.spacing.sm)
                 ) {
                     Text(
-                        text = contributor.login,
+                        text = contributor.name,
                         style = MaterialTheme.typography.titleMedium,
-                        color = NuvioColors.TextPrimary,
+                        color = NuvioTheme.colors.TextPrimary,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
-                    contributorRoleLabel(contributor.login)?.let { role ->
+                    contributorRoleLabel(contributor.githubLogin ?: contributor.name)?.let { role ->
                         ContributorRoleBadge(role = role)
                     }
                 }
-                Spacer(modifier = Modifier.height(4.dp))
-                Text(
-                    text = stringResource(
-                        R.string.contributors_total_contributions,
-                        contributor.totalContributions
-                    ),
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = if (isFocused) {
-                        NuvioColors.TextPrimary.copy(alpha = 0.9f)
-                    } else {
-                        NuvioColors.TextSecondary
-                    },
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
             }
 
             Icon(
                 imageVector = Icons.AutoMirrored.Filled.OpenInNew,
                 contentDescription = null,
-                tint = if (isFocused) NuvioColors.FocusRing else NuvioColors.TextTertiary,
+                tint = if (isFocused) NuvioTheme.colors.FocusRing else NuvioTheme.colors.TextTertiary,
                 modifier = Modifier.size(20.dp)
             )
         }
@@ -880,16 +853,16 @@ private fun ContributorCard(
 private fun ContributorRoleBadge(role: String) {
     Box(
         modifier = Modifier
-            .clip(RoundedCornerShape(8.dp))
-            .background(NuvioColors.Background)
-            .border(1.dp, NuvioColors.Border, RoundedCornerShape(8.dp))
-            .padding(horizontal = 8.dp, vertical = 4.dp),
+            .clip(RoundedCornerShape(NuvioTheme.radii.sm))
+            .background(NuvioTheme.colors.Background)
+            .border(NuvioTheme.spacing.hairline, NuvioTheme.colors.Border, RoundedCornerShape(NuvioTheme.radii.sm))
+            .padding(horizontal = NuvioTheme.spacing.sm, vertical = NuvioTheme.spacing.xs),
         contentAlignment = Alignment.Center
     ) {
         Text(
             text = role,
             style = MaterialTheme.typography.labelSmall,
-            color = NuvioColors.TextSecondary,
+            color = NuvioTheme.colors.TextSecondary,
             fontWeight = FontWeight.Medium
         )
     }
@@ -905,22 +878,22 @@ private fun NameAvatar(
     Box(
         modifier = modifier
             .clip(CircleShape)
-            .background(NuvioColors.Background)
-            .border(1.dp, NuvioColors.Border, CircleShape),
+            .background(NuvioTheme.colors.Background)
+            .border(NuvioTheme.spacing.hairline, NuvioTheme.colors.Border, CircleShape),
         contentAlignment = Alignment.Center
     ) {
         Text(
             text = initial,
             style = MaterialTheme.typography.titleMedium,
-            color = NuvioColors.TextPrimary,
+            color = NuvioTheme.colors.TextPrimary,
             fontWeight = FontWeight.SemiBold
         )
     }
 }
 
 @Composable
-private fun ContributorAvatar(
-    login: String,
+private fun PersonAvatar(
+    label: String,
     avatarUrl: String?,
     modifier: Modifier = Modifier
 ) {
@@ -935,21 +908,21 @@ private fun ContributorAvatar(
     Box(
         modifier = modifier
             .clip(CircleShape)
-            .background(NuvioColors.Background)
-            .border(1.dp, NuvioColors.Border, CircleShape),
+            .background(NuvioTheme.colors.Background)
+            .border(NuvioTheme.spacing.hairline, NuvioTheme.colors.Border, CircleShape),
         contentAlignment = Alignment.Center
     ) {
-        if (avatarUrl.isNullOrBlank() || painter.state is AsyncImagePainter.State.Error) {
+        if (avatarUrl.isNullOrBlank() || painter.state.collectAsState().value is AsyncImagePainter.State.Error) {
             Text(
-                text = login.take(1).uppercase(),
+                text = label.take(1).uppercase(),
                 style = MaterialTheme.typography.titleMedium,
-                color = NuvioColors.TextPrimary,
+                color = NuvioTheme.colors.TextPrimary,
                 fontWeight = FontWeight.SemiBold
             )
         } else {
             Image(
                 painter = painter,
-                contentDescription = login,
+                contentDescription = label,
                 modifier = Modifier.fillMaxSize(),
                 contentScale = ContentScale.Crop
             )
@@ -958,7 +931,7 @@ private fun ContributorAvatar(
 }
 
 @Composable
-private fun SupportersTabButton(
+private fun RowScope.SupportersTabButton(
     label: String,
     selected: Boolean,
     leftFocusRequester: FocusRequester?,
@@ -970,7 +943,7 @@ private fun SupportersTabButton(
     Card(
         onClick = onClick,
         modifier = Modifier
-            .width(180.dp)
+            .weight(1f)
             .heightIn(min = 54.dp)
             .focusRequester(focusRequester)
             .then(
@@ -985,20 +958,20 @@ private fun SupportersTabButton(
                 if (state.isFocused) onClick()
             },
         colors = CardDefaults.colors(
-            containerColor = if (selected) NuvioColors.BackgroundCard else NuvioColors.Background,
-            focusedContainerColor = NuvioColors.BackgroundCard
+            containerColor = if (selected) NuvioTheme.colors.BackgroundCard else NuvioTheme.colors.Background,
+            focusedContainerColor = NuvioTheme.colors.BackgroundCard
         ),
         border = CardDefaults.border(
             border = if (selected) {
                 Border(
-                    border = BorderStroke(1.dp, NuvioColors.FocusRing.copy(alpha = 0.8f)),
+                    border = NuvioTheme.focusRing.border(NuvioTheme.spacing.hairline, alpha = 0.8f),
                     shape = RoundedCornerShape(999.dp)
                 )
             } else {
                 Border.None
             },
             focusedBorder = Border(
-                border = BorderStroke(2.dp, NuvioColors.FocusRing),
+                border = NuvioTheme.focusRing.border(NuvioTheme.spacing.xxs),
                 shape = RoundedCornerShape(999.dp)
             )
         ),
@@ -1016,19 +989,104 @@ private fun SupportersTabButton(
                 text = label,
                 style = MaterialTheme.typography.bodyLarge,
                 color = when {
-                    isFocused -> NuvioColors.TextPrimary
-                    selected -> NuvioColors.TextPrimary
-                    else -> NuvioColors.TextSecondary
+                    isFocused -> NuvioTheme.colors.TextPrimary
+                    selected -> NuvioTheme.colors.TextPrimary
+                    else -> NuvioTheme.colors.TextSecondary
                 },
-                fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium
+                fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
             )
         }
     }
 }
 
 @Composable
+private fun SponsorDetailsDialog(
+    sponsor: DevelopmentSponsor,
+    onDismiss: () -> Unit
+) {
+    val context = LocalContext.current
+    val primaryFocusRequester = remember { FocusRequester() }
+
+    LaunchedEffect(sponsor.id) {
+        primaryFocusRequester.requestFocusAfterFrames()
+    }
+
+    NuvioDialog(
+        onDismiss = onDismiss,
+        title = sponsor.name,
+        subtitle = sponsor.channelUrl ?: stringResource(R.string.sponsors_channel_unavailable),
+        width = 560.dp,
+        suppressFirstKeyUp = false
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(NuvioTheme.spacing.lg)
+        ) {
+            NameAvatar(
+                label = sponsor.name,
+                modifier = Modifier.size(72.dp)
+            )
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(NuvioTheme.spacing.sm)
+            ) {
+                Text(
+                    text = stringResource(R.string.sponsors_detail_copy),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = NuvioTheme.colors.TextSecondary
+                )
+                sponsor.channelUrl?.let { url ->
+                    Text(
+                        text = url,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = NuvioTheme.colors.TextSecondary
+                    )
+                }
+            }
+        }
+
+        Row(horizontalArrangement = Arrangement.spacedBy(NuvioTheme.spacing.md)) {
+            Button(
+                onClick = {
+                    val channelUrl = sponsor.channelUrl ?: return@Button
+                    runCatching {
+                        context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(channelUrl)))
+                    }
+                },
+                enabled = sponsor.channelUrl != null,
+                modifier = Modifier.focusRequester(primaryFocusRequester),
+                colors = ButtonDefaults.colors(
+                    containerColor = NuvioTheme.colors.Secondary,
+                    focusedContainerColor = NuvioTheme.colors.SecondaryVariant,
+                    contentColor = NuvioTheme.colors.OnSecondary,
+                    focusedContentColor = NuvioTheme.colors.OnSecondaryVariant
+                ),
+                shape = ButtonDefaults.shape(RoundedCornerShape(50))
+            ) {
+                Text(text = stringResource(R.string.sponsors_open_channel))
+            }
+
+            Button(
+                onClick = onDismiss,
+                colors = ButtonDefaults.colors(
+                    containerColor = NuvioTheme.colors.BackgroundCard,
+                    focusedContainerColor = NuvioTheme.colors.FocusBackground,
+                    contentColor = NuvioTheme.colors.TextPrimary,
+                    focusedContentColor = NuvioTheme.colors.Primary
+                ),
+                shape = ButtonDefaults.shape(RoundedCornerShape(50))
+            ) {
+                Text(text = stringResource(R.string.action_close))
+            }
+        }
+    }
+}
+
+@Composable
 private fun SupporterDetailsDialog(
-    supporter: SupporterDonation,
+    supporter: SupporterMember,
     onDismiss: () -> Unit
 ) {
     val context = LocalContext.current
@@ -1041,39 +1099,42 @@ private fun SupporterDetailsDialog(
     NuvioDialog(
         onDismiss = onDismiss,
         title = supporter.name,
-        subtitle = formatDonationDate(supporter.date),
+        subtitle = supporterTierLabel(supporter.membershipLevel),
         width = 560.dp,
         suppressFirstKeyUp = false
     ) {
         Row(
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(16.dp)
+            horizontalArrangement = Arrangement.spacedBy(NuvioTheme.spacing.lg)
         ) {
-            NameAvatar(
+            PersonAvatar(
                 label = supporter.name,
+                avatarUrl = supporter.avatarUrl,
                 modifier = Modifier.size(72.dp)
             )
             Text(
-                text = supporter.message ?: stringResource(R.string.supporters_no_message),
+                text = formatSupporterDate(supporter.supporterSince)?.let { date ->
+                    stringResource(R.string.supporters_since, date)
+                } ?: stringResource(R.string.supporters_since_unknown),
                 style = MaterialTheme.typography.bodyMedium,
-                color = NuvioColors.TextSecondary,
+                color = NuvioTheme.colors.TextSecondary,
                 modifier = Modifier.weight(1f)
             )
         }
 
-        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        Row(horizontalArrangement = Arrangement.spacedBy(NuvioTheme.spacing.md)) {
             Button(
                 onClick = {
                     runCatching {
-                        context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(DONATIONS_URL)))
+                        context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(SUPPORT_URL)))
                     }
                 },
                 modifier = Modifier.focusRequester(primaryFocusRequester),
                 colors = ButtonDefaults.colors(
-                    containerColor = NuvioColors.Secondary,
-                    focusedContainerColor = NuvioColors.SecondaryVariant,
-                    contentColor = NuvioColors.OnSecondary,
-                    focusedContentColor = NuvioColors.OnSecondaryVariant
+                    containerColor = NuvioTheme.colors.Secondary,
+                    focusedContainerColor = NuvioTheme.colors.SecondaryVariant,
+                    contentColor = NuvioTheme.colors.OnSecondary,
+                    focusedContentColor = NuvioTheme.colors.OnSecondaryVariant
                 ),
                 shape = ButtonDefaults.shape(RoundedCornerShape(50))
             ) {
@@ -1083,10 +1144,10 @@ private fun SupporterDetailsDialog(
             Button(
                 onClick = onDismiss,
                 colors = ButtonDefaults.colors(
-                    containerColor = NuvioColors.BackgroundCard,
-                    focusedContainerColor = NuvioColors.FocusBackground,
-                    contentColor = NuvioColors.TextPrimary,
-                    focusedContentColor = NuvioColors.Primary
+                    containerColor = NuvioTheme.colors.BackgroundCard,
+                    focusedContainerColor = NuvioTheme.colors.FocusBackground,
+                    contentColor = NuvioTheme.colors.TextPrimary,
+                    focusedContentColor = NuvioTheme.colors.Primary
                 ),
                 shape = ButtonDefaults.shape(RoundedCornerShape(50))
             ) {
@@ -1103,54 +1164,51 @@ private fun ContributorDetailsDialog(
 ) {
     val context = LocalContext.current
     val primaryFocusRequester = remember { FocusRequester() }
-    val supportLink = contributorSupportLink(contributor.login)
-    var showSupportQr by remember(contributor.login) { mutableStateOf(false) }
+    val contributorSupportKey = contributor.githubLogin ?: contributor.name
+    val supportLink = contributorSupportLink(contributorSupportKey)
+    var showSupportQr by remember(contributor.id) { mutableStateOf(false) }
     val supportQrBitmap = remember(supportLink?.kofiUrl) {
         supportLink?.kofiUrl?.let { url ->
             runCatching { QrCodeGenerator.generate(url, 360) }.getOrNull()
         }
     }
 
-    LaunchedEffect(contributor.login) {
+    LaunchedEffect(contributor.id) {
         primaryFocusRequester.requestFocusAfterFrames()
     }
 
     NuvioDialog(
         onDismiss = onDismiss,
-        title = contributor.login,
-        subtitle = stringResource(
-            R.string.contributors_total_contributions,
-            contributor.totalContributions
-        ),
+        title = contributor.name,
         width = 560.dp,
         suppressFirstKeyUp = false
     ) {
         Row(
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(16.dp)
+            horizontalArrangement = Arrangement.spacedBy(NuvioTheme.spacing.lg)
         ) {
-            ContributorAvatar(
-                login = contributor.login,
+            PersonAvatar(
+                label = contributor.name,
                 avatarUrl = contributor.avatarUrl,
                 modifier = Modifier.size(72.dp)
             )
             Column(
                 modifier = Modifier.weight(1f),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
+                verticalArrangement = Arrangement.spacedBy(NuvioTheme.spacing.sm)
             ) {
-                contributorRoleLabel(contributor.login)?.let { role ->
+                contributorRoleLabel(contributorSupportKey)?.let { role ->
                     ContributorRoleBadge(role = role)
                 }
                 Text(
                     text = contributor.profileUrl ?: stringResource(R.string.contributors_profile_unavailable),
                     style = MaterialTheme.typography.bodySmall,
-                    color = NuvioColors.TextSecondary
+                    color = NuvioTheme.colors.TextSecondary
                 )
                 supportLink?.kofiUrl?.let { url ->
                     Text(
                         text = url,
                         style = MaterialTheme.typography.bodySmall,
-                        color = NuvioColors.TextSecondary
+                        color = NuvioTheme.colors.TextSecondary
                     )
                 }
             }
@@ -1160,12 +1218,12 @@ private fun ContributorDetailsDialog(
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(top = 8.dp),
+                    .padding(top = NuvioTheme.spacing.sm),
                 contentAlignment = Alignment.Center
             ) {
                 Image(
                     bitmap = supportQrBitmap.asImageBitmap(),
-                    contentDescription = "Contributor support QR code",
+                    contentDescription = stringResource(R.string.cd_contributor_qr),
                     modifier = Modifier
                         .size(188.dp)
                         .clip(RoundedCornerShape(20.dp))
@@ -1173,7 +1231,7 @@ private fun ContributorDetailsDialog(
             }
         }
 
-        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        Row(horizontalArrangement = Arrangement.spacedBy(NuvioTheme.spacing.md)) {
             Button(
                 onClick = {
                     val profileUrl = contributor.profileUrl ?: return@Button
@@ -1186,10 +1244,10 @@ private fun ContributorDetailsDialog(
                 enabled = contributor.profileUrl != null,
                 modifier = Modifier.focusRequester(primaryFocusRequester),
                 colors = ButtonDefaults.colors(
-                    containerColor = NuvioColors.Secondary,
-                    focusedContainerColor = NuvioColors.SecondaryVariant,
-                    contentColor = NuvioColors.OnSecondary,
-                    focusedContentColor = NuvioColors.OnSecondaryVariant
+                    containerColor = NuvioTheme.colors.Secondary,
+                    focusedContainerColor = NuvioTheme.colors.SecondaryVariant,
+                    contentColor = NuvioTheme.colors.OnSecondary,
+                    focusedContentColor = NuvioTheme.colors.OnSecondaryVariant
                 ),
                 shape = ButtonDefaults.shape(RoundedCornerShape(50))
             ) {
@@ -1200,10 +1258,10 @@ private fun ContributorDetailsDialog(
                 Button(
                     onClick = { showSupportQr = !showSupportQr },
                     colors = ButtonDefaults.colors(
-                        containerColor = NuvioColors.BackgroundCard,
-                        focusedContainerColor = NuvioColors.FocusBackground,
-                        contentColor = NuvioColors.TextPrimary,
-                        focusedContentColor = NuvioColors.Primary
+                        containerColor = NuvioTheme.colors.BackgroundCard,
+                        focusedContainerColor = NuvioTheme.colors.FocusBackground,
+                        contentColor = NuvioTheme.colors.TextPrimary,
+                        focusedContentColor = NuvioTheme.colors.Primary
                     ),
                     shape = ButtonDefaults.shape(RoundedCornerShape(50))
                 ) {
@@ -1222,10 +1280,10 @@ private fun ContributorDetailsDialog(
             Button(
                 onClick = onDismiss,
                 colors = ButtonDefaults.colors(
-                    containerColor = NuvioColors.BackgroundCard,
-                    focusedContainerColor = NuvioColors.FocusBackground,
-                    contentColor = NuvioColors.TextPrimary,
-                    focusedContentColor = NuvioColors.Primary
+                    containerColor = NuvioTheme.colors.BackgroundCard,
+                    focusedContainerColor = NuvioTheme.colors.FocusBackground,
+                    contentColor = NuvioTheme.colors.TextPrimary,
+                    focusedContentColor = NuvioTheme.colors.Primary
                 ),
                 shape = ButtonDefaults.shape(RoundedCornerShape(50))
             ) {
@@ -1235,9 +1293,10 @@ private fun ContributorDetailsDialog(
     }
 }
 
+@Composable
 private fun contributorRoleLabel(login: String): String? = when (login.lowercase(Locale.ROOT)) {
-    "milicevicivan" -> "Translator"
-    "tapframe" -> "Maintainer"
+    "milicevicivan" -> stringResource(R.string.contributor_role_translator)
+    "tapframe" -> stringResource(R.string.contributor_role_maintainer)
     else -> null
 }
 
@@ -1247,17 +1306,32 @@ private data class ContributorSupportLink(
 
 private val contributorSupportLinks = mapOf(
     "skoruppa" to ContributorSupportLink(
-        kofiUrl = "https://buymeacoffee.com/skoruppa"
+        kofiUrl = "https://ko-fi.com/skoruppa"
     ),
     "crisszollo" to ContributorSupportLink(
         kofiUrl = "https://ko-fi.com/crisszollo"
+    ),
+    "whitegiso" to ContributorSupportLink(
+        kofiUrl = "https://ko-fi.com/whitegiso"
+    ),
+    "edoedac0" to ContributorSupportLink(
+        kofiUrl = "https://ko-fi.com/edoedac"
     )
 )
 
 private fun contributorSupportLink(login: String): ContributorSupportLink? =
     contributorSupportLinks[login.lowercase(Locale.ROOT)]
 
-private fun formatDonationDate(rawDate: String): String {
+@Composable
+private fun supporterTierLabel(tier: MemberTier): String = stringResource(
+    when (tier) {
+        MemberTier.SUPPORTER -> R.string.supporters_level_supporter
+        MemberTier.SUPPORTER_PLUS -> R.string.supporters_level_supporter_plus
+    }
+)
+
+private fun formatSupporterDate(rawDate: String?): String? {
+    if (rawDate.isNullOrBlank()) return null
     return runCatching {
         val formatter = DateTimeFormatter.ofPattern("MMM d, yyyy", Locale.getDefault())
         Instant.parse(rawDate)

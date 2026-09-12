@@ -28,7 +28,7 @@ class ProfileSettingsViewModel @Inject constructor(
         .stateIn(viewModelScope, SharingStarted.Eagerly, true)
 
     val canAddProfile: Boolean
-        get() = profileManager.profiles.value.size < 4
+        get() = profileManager.canCreateProfile
 
     private val _isCreating = MutableStateFlow(false)
     val isCreating: StateFlow<Boolean> = _isCreating.asStateFlow()
@@ -43,16 +43,13 @@ class ProfileSettingsViewModel @Inject constructor(
         if (_isCreating.value) return
         viewModelScope.launch {
             _isCreating.value = true
-            val existingIds = profileManager.profiles.value.map { it.id }.toSet()
-            val success = profileManager.createProfile(
+            val newProfile = profileManager.createProfile(
                 name = name,
                 avatarColorHex = avatarColorHex,
                 avatarId = avatarId
             )
-            if (success) {
-                val profiles = profileManager.profiles.value
-                val newProfile = profiles.firstOrNull { it.id !in existingIds }
-                if (newProfile != null && (usesPrimaryAddons || usesPrimaryPlugins)) {
+            if (newProfile != null) {
+                if (usesPrimaryAddons || usesPrimaryPlugins) {
                     profileManager.updateProfile(
                         newProfile.copy(
                             usesPrimaryAddons = usesPrimaryAddons,

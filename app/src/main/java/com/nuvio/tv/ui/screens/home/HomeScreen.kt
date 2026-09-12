@@ -1,6 +1,11 @@
 package com.nuvio.tv.ui.screens.home
 
+import com.nuvio.tv.ui.theme.NuvioTheme
+
+import androidx.activity.compose.ReportDrawnWhen
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.EnterTransition
+import android.util.Log
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.slideInVertically
@@ -10,10 +15,15 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Divider
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -25,6 +35,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
@@ -36,22 +47,32 @@ import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.Text
 import com.nuvio.tv.domain.model.HomeLayout
 import com.nuvio.tv.domain.model.LibraryListTab
+import com.nuvio.tv.domain.model.localizedTitle
 import com.nuvio.tv.domain.model.LibrarySourceMode
 import com.nuvio.tv.domain.model.MetaPreview
 import com.nuvio.tv.ui.components.ErrorState
 import com.nuvio.tv.ui.components.LoadingIndicator
+import com.nuvio.tv.ui.components.LocalStartupLoadingState
+import com.nuvio.tv.ui.components.LocalStartupSplashEnabled
+import com.nuvio.tv.ui.components.shouldShowHomeStartupLoader
 import com.nuvio.tv.ui.components.NuvioDialog
 import com.nuvio.tv.ui.components.PosterCardDefaults
 import com.nuvio.tv.ui.components.PosterCardStyle
 import androidx.compose.ui.res.stringResource
 import com.nuvio.tv.R
-import com.nuvio.tv.ui.theme.NuvioColors
+import com.nuvio.tv.core.tracking.LOCAL_LIBRARY_LIST_KEY
+import com.nuvio.tv.core.tracking.supportsMembershipFor
+import com.nuvio.tv.data.local.StartupAuthNotice
+import com.nuvio.tv.ui.components.posteroptions.TrackingRemovalConfirmationDialog
+import kotlinx.coroutines.delay
 import kotlin.math.roundToInt
 
 private data class HomePosterOptionsTarget(
     val item: MetaPreview,
     val addonBaseUrl: String
 )
+
+private const val HOME_STABLE_GATE_TIMEOUT_MS = 5_000L
 
 @OptIn(ExperimentalTvMaterial3Api::class)
 @Composable
@@ -73,20 +94,118 @@ fun HomeScreen(
     },
     onContinueWatchingStartFromBeginning: (ContinueWatchingItem) -> Unit = onContinueWatchingClick,
     onContinueWatchingPlayManually: (ContinueWatchingItem) -> Unit = onContinueWatchingClick,
-    onNavigateToCatalogSeeAll: (String, String, String) -> Unit = { _, _, _ -> }
+    onNavigateToCatalogSeeAll: (String, String, String) -> Unit = { _, _, _ -> },
+    onNavigateToFolderDetail: (String, String) -> Unit = { _, _ -> }
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+
+    // Home was the only major screen without a lifecycle observer, so nothing ever told it to
+    // look at its catalogs again.
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                viewModel.refreshHomeCatalogsIfStale()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+    val modernPresentation by viewModel.modernHomePresentation.collectAsStateWithLifecycle()
+    val initialCwResolved by viewModel.initialCwResolved.collectAsStateWithLifecycle()
+    val scrollToTopTrigger by viewModel.scrollToTopTrigger.collectAsStateWithLifecycle()
     val effectiveAutoplayEnabled by viewModel.effectiveAutoplayEnabled.collectAsStateWithLifecycle(
         initialValue = false
     )
     val hasCatalogContent = uiState.catalogRows.any { it.items.isNotEmpty() }
-    var hasEnteredCatalogContent by rememberSaveable { mutableStateOf(false) }
+    val hasCollectionContent = uiState.homeRows.any { it is HomeRow.CollectionRow }
+    val hasHeroContent = uiState.heroItems.isNotEmpty()
+    val modernPresentationReady =
+        uiState.homeLayout != HomeLayout.MODERN ||
+            modernPresentation.rows.list.isNotEmpty() ||
+            (uiState.heroSectionEnabled && hasHeroContent && !hasCatalogContent && !hasCollectionContent)
     var showHomeContentWithAnimation by rememberSaveable { mutableStateOf(false) }
+    var hasShownInitialHomeContent by rememberSaveable { mutableStateOf(false) }
+    // Once we've shown stable home content, never go back to loading gate.
+    var homeStableGateReleased by rememberSaveable { mutableStateOf(false) }
+    // Track that catalog loading has started at least once (isLoading went true→false).
+    var catalogLoadingStarted by rememberSaveable { mutableStateOf(false) }
     var posterOptionsTarget by remember { mutableStateOf<HomePosterOptionsTarget?>(null) }
 
-    LaunchedEffect(hasCatalogContent) {
-        if (hasCatalogContent) {
-            hasEnteredCatalogContent = true
+    LaunchedEffect(uiState.homeLayout) {
+        if (uiState.homeLayout != HomeLayout.MODERN) {
+            HeroBackdropState.update(null)
+        }
+    }
+
+    // Notify ViewModel of locale changes after activity recreation
+    LaunchedEffect(Unit) {
+        viewModel.notifyLocaleChanged()
+    }
+
+    val movieWatchedStatus = uiState.movieWatchedStatus
+    // Use a stable lambda whose identity NEVER changes. The lambda captures
+    // movieWatchedStatus via rememberUpdatedState so it always reads the latest
+    // value without forcing downstream recomposition from lambda identity change.
+    val latestMovieWatchedStatus = androidx.compose.runtime.rememberUpdatedState(movieWatchedStatus)
+    val isCatalogItemWatched: (MetaPreview) -> Boolean = remember {
+        { item: MetaPreview -> latestMovieWatchedStatus.value[homeItemStatusKey(item.id, item.apiType)] == true }
+    }
+    val onCatalogItemLongPress: (MetaPreview, String) -> Unit = remember {
+        { item, addonBaseUrl ->
+            posterOptionsTarget = HomePosterOptionsTarget(item, addonBaseUrl)
+            viewModel.refreshPosterLibraryStatus(item)
+        }
+    }
+
+    val onNavigateToDetailStable = remember(onNavigateToDetail) { onNavigateToDetail }
+    val onContinueWatchingClickStable = remember(onContinueWatchingClick) { onContinueWatchingClick }
+    val onContinueWatchingStartFromBeginningStable = remember(onContinueWatchingStartFromBeginning) { onContinueWatchingStartFromBeginning }
+    val onContinueWatchingPlayManuallyStable = remember(onContinueWatchingPlayManually) { onContinueWatchingPlayManually }
+    val onNavigateToCatalogSeeAllStable = remember(onNavigateToCatalogSeeAll) { onNavigateToCatalogSeeAll }
+    val onNavigateToFolderDetailStable = remember(onNavigateToFolderDetail) { onNavigateToFolderDetail }
+    val onRemoveContinueWatchingStable = remember(viewModel) {
+        { contentId: String, season: Int?, episode: Int?, isNextUp: Boolean ->
+            viewModel.onEvent(HomeEvent.OnRemoveContinueWatching(contentId, season, episode, isNextUp))
+        }
+    }
+
+    LaunchedEffect(
+        uiState.isLoading,
+        hasCatalogContent,
+        hasCollectionContent,
+        hasHeroContent,
+        initialCwResolved,
+        modernPresentationReady
+    ) {
+        // Track that addons are known (even if isLoading flipped too fast to catch).
+        if (uiState.installedAddonsCount > 0) {
+            catalogLoadingStarted = true
+        }
+        // Wait until catalog loading has completed with content AND the CW
+        // pipeline has completed its first emission.
+        if (!homeStableGateReleased &&
+            catalogLoadingStarted &&
+            !uiState.isLoading &&
+            initialCwResolved &&
+            modernPresentationReady &&
+            // When addons are installed, require at least one catalog row.
+            (hasCatalogContent || uiState.installedAddonsCount == 0)
+        ) {
+            Log.d("HomeGate", "RELEASE: catalogs=$hasCatalogContent cwResolved=$initialCwResolved cwItems=${uiState.continueWatchingItems.size} addons=${uiState.installedAddonsCount}")
+            homeStableGateReleased = true
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        // Safety timeout — if catalogs and CW haven't loaded within this
+        // window, show whatever is available.  Covers edge cases like
+        // clean cache (addons loading from remote sync) and users with
+        // no addons at all.
+        delay(HOME_STABLE_GATE_TIMEOUT_MS)
+        if (!homeStableGateReleased) {
+            Log.d("HomeGate", "RELEASE timeout: isLoading=${uiState.isLoading} cwResolved=$initialCwResolved catalogs=$hasCatalogContent cwItems=${uiState.continueWatchingItems.size}")
+            homeStableGateReleased = true
         }
     }
 
@@ -104,48 +223,80 @@ fun HomeScreen(
         )
     }
 
+    val noAddonsError = stringResource(R.string.home_error_no_addons)
+    val noCatalogAddonsError = stringResource(R.string.home_error_no_catalog_addons)
+    val hasAnyContent = uiState.catalogRows.isNotEmpty() ||
+        (uiState.continueWatchingEnabled && uiState.continueWatchingItems.isNotEmpty()) ||
+        uiState.heroItems.isNotEmpty() ||
+        hasCollectionContent
+    val showStartupLoader = when {
+        !uiState.layoutPreferencesReady -> true
+        uiState.isLoading && !hasAnyContent -> true
+        uiState.error == noAddonsError && uiState.catalogRows.isEmpty() -> !homeStableGateReleased
+        uiState.error == noCatalogAddonsError && uiState.catalogRows.isEmpty() && !hasCollectionContent && !hasHeroContent -> !homeStableGateReleased
+        uiState.error != null && uiState.catalogRows.isEmpty() -> false
+        !uiState.isLoading && !hasAnyContent -> !homeStableGateReleased
+        else -> !homeStableGateReleased || !modernPresentationReady || !showHomeContentWithAnimation
+    }
+
+    // Reports the home screen as fully drawn once it leaves the loading state so startup timing is measurable and post-launch work can be deferred.
+    ReportDrawnWhen { !showStartupLoader }
+
+    val startupLoadingState = LocalStartupLoadingState.current
+    val showHomeLoader = shouldShowHomeStartupLoader(
+        loading = showStartupLoader,
+        sharedSplashEnabled = LocalStartupSplashEnabled.current,
+        startupComplete = startupLoadingState?.complete != false
+    )
+    LaunchedEffect(showStartupLoader, startupLoadingState) {
+        if (!showStartupLoader) {
+            startupLoadingState?.complete = true
+        }
+    }
+
     Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(NuvioColors.Background)
+        modifier = Modifier.fillMaxSize()
     ) {
-        val hasAnyContent = uiState.catalogRows.isNotEmpty() ||
-            uiState.continueWatchingItems.isNotEmpty() ||
-            uiState.heroItems.isNotEmpty()
-
         when {
+            !uiState.layoutPreferencesReady -> {
+                Unit
+            }
+
             uiState.isLoading && !hasAnyContent -> {
-                Box(
-                    modifier = Modifier.fillMaxSize(),
-                    contentAlignment = Alignment.Center
-                ) {
-                    LoadingIndicator()
+                Unit
+            }
+
+            uiState.error == noAddonsError && uiState.catalogRows.isEmpty() -> {
+                if (!homeStableGateReleased) {
+                    Unit
+                } else {
+                    Box(
+                        modifier = Modifier.fillMaxSize(),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = stringResource(R.string.home_no_addons),
+                            style = MaterialTheme.typography.bodyLarge,
+                            color = NuvioTheme.colors.TextSecondary
+                        )
+                    }
                 }
             }
 
-            uiState.error == "No addons installed" && uiState.catalogRows.isEmpty() -> {
-                Box(
-                    modifier = Modifier.fillMaxSize(),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(
-                        text = stringResource(R.string.home_no_addons),
-                        style = MaterialTheme.typography.bodyLarge,
-                        color = NuvioColors.TextSecondary
-                    )
-                }
-            }
-
-            uiState.error == "No catalog addons installed" && uiState.catalogRows.isEmpty() -> {
-                Box(
-                    modifier = Modifier.fillMaxSize(),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(
-                        text = stringResource(R.string.home_no_catalog_addons),
-                        style = MaterialTheme.typography.bodyLarge,
-                        color = NuvioColors.TextSecondary
-                    )
+            uiState.error == noCatalogAddonsError && uiState.catalogRows.isEmpty() && !hasCollectionContent && !hasHeroContent -> {
+                if (!homeStableGateReleased) {
+                    Unit
+                } else {
+                    Box(
+                        modifier = Modifier.fillMaxSize(),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = stringResource(R.string.home_no_catalog_addons),
+                            style = MaterialTheme.typography.bodyLarge,
+                            color = NuvioTheme.colors.TextSecondary
+                        )
+                    }
                 }
             }
 
@@ -156,88 +307,140 @@ fun HomeScreen(
                 )
             }
 
-            else -> {
-                val shouldShowLoadingGate = !hasEnteredCatalogContent && !hasCatalogContent
-                LaunchedEffect(shouldShowLoadingGate) {
-                    if (shouldShowLoadingGate) {
-                        showHomeContentWithAnimation = false
-                    } else {
-                        // Flip on the next frame so AnimatedVisibility can run enter transition.
-                        kotlinx.coroutines.yield()
-                        showHomeContentWithAnimation = true
-                    }
-                }
-                if (shouldShowLoadingGate) {
+            !uiState.isLoading && !hasAnyContent -> {
+                // Don't show "no catalogs" until the stable gate has released —
+                // addons may still be loading from remote after a cache clear.
+                if (!homeStableGateReleased) {
+                    Unit
+                } else {
                     Box(
                         modifier = Modifier.fillMaxSize(),
                         contentAlignment = Alignment.Center
                     ) {
-                        LoadingIndicator()
+                        Text(
+                            text = stringResource(R.string.web_no_catalogs),
+                            style = MaterialTheme.typography.bodyLarge,
+                            color = NuvioTheme.colors.TextSecondary
+                        )
                     }
+                }
+            }
+
+            else -> {
+                // On first launch, wait for stable content before revealing home.
+                // Once released, never go back to loading (homeStableGateReleased is rememberSaveable).
+                if (!homeStableGateReleased) {
+                    Unit
+                } else if (!modernPresentationReady) {
+                    Unit
                 } else {
+                    // Flip showHomeContentWithAnimation on the next frame so
+                    // AnimatedVisibility can run its enter transition.
+                    LaunchedEffect(Unit) {
+                        if (!showHomeContentWithAnimation) {
+                            kotlinx.coroutines.yield()
+                            showHomeContentWithAnimation = true
+                        }
+                    }
+                    LaunchedEffect(showHomeContentWithAnimation) {
+                        if (showHomeContentWithAnimation) {
+                            hasShownInitialHomeContent = true
+                        }
+                    }
+                    // Keep loading visible during the single-frame gap before animation starts.
+                    if (!showHomeContentWithAnimation) {
+                        Unit
+                    }
                     AnimatedVisibility(
                         visible = showHomeContentWithAnimation,
-                        enter = fadeIn(animationSpec = tween(320)) +
-                            slideInVertically(
-                                initialOffsetY = { it / 24 },
-                                animationSpec = tween(320)
-                            )
+                        enter = if (hasShownInitialHomeContent) {
+                            EnterTransition.None
+                        } else {
+                            fadeIn(animationSpec = tween(320)) +
+                                slideInVertically(
+                                    initialOffsetY = { it / 24 },
+                                    animationSpec = tween(320)
+                                )
+                        }
                     ) {
                         when (uiState.homeLayout) {
                             HomeLayout.CLASSIC -> ClassicHomeRoute(
                                 viewModel = viewModel,
                                 uiState = uiState,
                                 posterCardStyle = posterCardStyle,
-                                onNavigateToDetail = onNavigateToDetail,
-                                onContinueWatchingClick = onContinueWatchingClick,
-                                onContinueWatchingStartFromBeginning = onContinueWatchingStartFromBeginning,
-                                onContinueWatchingPlayManually = onContinueWatchingPlayManually,
+                                onNavigateToDetail = onNavigateToDetailStable,
+                                onContinueWatchingClick = onContinueWatchingClickStable,
+                                onContinueWatchingStartFromBeginning = onContinueWatchingStartFromBeginningStable,
+                                onContinueWatchingPlayManually = onContinueWatchingPlayManuallyStable,
                                 showContinueWatchingManualPlayOption = effectiveAutoplayEnabled,
-                                onNavigateToCatalogSeeAll = onNavigateToCatalogSeeAll,
-                                isCatalogItemWatched = { item ->
-                                    uiState.movieWatchedStatus[homeItemStatusKey(item.id, item.apiType)] == true
-                                },
-                                onCatalogItemLongPress = { item, addonBaseUrl ->
-                                    posterOptionsTarget = HomePosterOptionsTarget(item, addonBaseUrl)
-                                }
+                                onNavigateToCatalogSeeAll = onNavigateToCatalogSeeAllStable,
+                                onNavigateToFolderDetail = onNavigateToFolderDetailStable,
+                                isCatalogItemWatched = isCatalogItemWatched,
+                                onCatalogItemLongPress = onCatalogItemLongPress
                             )
 
                             HomeLayout.GRID -> GridHomeRoute(
                                 viewModel = viewModel,
                                 uiState = uiState,
                                 posterCardStyle = posterCardStyle,
-                                onNavigateToDetail = onNavigateToDetail,
-                                onContinueWatchingClick = onContinueWatchingClick,
-                                onContinueWatchingStartFromBeginning = onContinueWatchingStartFromBeginning,
-                                onContinueWatchingPlayManually = onContinueWatchingPlayManually,
+                                onNavigateToDetail = onNavigateToDetailStable,
+                                onContinueWatchingClick = onContinueWatchingClickStable,
+                                onContinueWatchingStartFromBeginning = onContinueWatchingStartFromBeginningStable,
+                                onContinueWatchingPlayManually = onContinueWatchingPlayManuallyStable,
                                 showContinueWatchingManualPlayOption = effectiveAutoplayEnabled,
-                                onNavigateToCatalogSeeAll = onNavigateToCatalogSeeAll,
-                                isCatalogItemWatched = { item ->
-                                    uiState.movieWatchedStatus[homeItemStatusKey(item.id, item.apiType)] == true
-                                },
-                                onCatalogItemLongPress = { item, addonBaseUrl ->
-                                    posterOptionsTarget = HomePosterOptionsTarget(item, addonBaseUrl)
-                                }
+                                onNavigateToCatalogSeeAll = onNavigateToCatalogSeeAllStable,
+                                onNavigateToFolderDetail = onNavigateToFolderDetailStable,
+                                isCatalogItemWatched = isCatalogItemWatched,
+                                onCatalogItemLongPress = onCatalogItemLongPress
                             )
 
                             HomeLayout.MODERN -> ModernHomeRoute(
                                 viewModel = viewModel,
                                 uiState = uiState,
-                                onNavigateToDetail = onNavigateToDetail,
-                                onContinueWatchingClick = onContinueWatchingClick,
-                                onContinueWatchingStartFromBeginning = onContinueWatchingStartFromBeginning,
-                                onContinueWatchingPlayManually = onContinueWatchingPlayManually,
+                                onNavigateToDetail = onNavigateToDetailStable,
+                                onContinueWatchingClick = onContinueWatchingClickStable,
+                                onContinueWatchingStartFromBeginning = onContinueWatchingStartFromBeginningStable,
+                                onContinueWatchingPlayManually = onContinueWatchingPlayManuallyStable,
                                 showContinueWatchingManualPlayOption = effectiveAutoplayEnabled,
-                                isCatalogItemWatched = { item ->
-                                    uiState.movieWatchedStatus[homeItemStatusKey(item.id, item.apiType)] == true
-                                },
-                                onCatalogItemLongPress = { item, addonBaseUrl ->
-                                    posterOptionsTarget = HomePosterOptionsTarget(item, addonBaseUrl)
-                                }
+                                onNavigateToFolderDetail = onNavigateToFolderDetailStable,
+                                isCatalogItemWatched = isCatalogItemWatched,
+                                onCatalogItemLongPress = onCatalogItemLongPress
                             )
                         }
                     }
                 }
+            }
+        }
+
+        if (showHomeLoader) {
+            Box(
+                modifier = Modifier.fillMaxSize(),
+                contentAlignment = Alignment.Center
+            ) {
+                LoadingIndicator()
+            }
+        }
+
+        val startupAuthNotice = uiState.startupAuthNotice
+        if (startupAuthNotice != null) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .padding(top = NuvioTheme.spacing.xl)
+                    .background(
+                        color = Color(0xFF5A1C1C),
+                        shape = RoundedCornerShape(10.dp)
+                    )
+                    .padding(horizontal = 18.dp, vertical = 10.dp)
+            ) {
+                Text(
+                    text = when (startupAuthNotice) {
+                        StartupAuthNotice.NUVIO -> stringResource(R.string.auth_notice_nuvio_logged_out)
+                        StartupAuthNotice.TRAKT -> stringResource(R.string.auth_notice_trakt_logged_out)
+                    },
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = NuvioTheme.colors.TextPrimary
+                )
             }
         }
     }
@@ -247,13 +450,17 @@ fun HomeScreen(
         val item = selectedPoster.item
         val statusKey = homeItemStatusKey(item.id, item.apiType)
         val isMovie = item.apiType.equals("movie", ignoreCase = true)
+        val isSeries = item.apiType.equals("series", ignoreCase = true) ||
+            item.apiType.equals("tv", ignoreCase = true) ||
+            item.apiType.equals("anime", ignoreCase = true)
         HomePosterOptionsDialog(
             title = item.name,
             isInLibrary = uiState.posterLibraryMembership[statusKey] == true,
             isLibraryPending = statusKey in uiState.posterLibraryPending,
-            showManageLists = uiState.librarySourceMode == LibrarySourceMode.TRAKT,
+            showManageLists = uiState.librarySourceMode != LibrarySourceMode.LOCAL,
             isMovie = isMovie,
-            isWatched = uiState.movieWatchedStatus[statusKey] == true,
+            isSeries = isSeries,
+            isWatched = movieWatchedStatus[statusKey] == true,
             isWatchedPending = statusKey in uiState.movieWatchedPending,
             onDismiss = { posterOptionsTarget = null },
             onDetails = {
@@ -261,7 +468,7 @@ fun HomeScreen(
                 posterOptionsTarget = null
             },
             onToggleLibrary = {
-                if (uiState.librarySourceMode == LibrarySourceMode.TRAKT) {
+                if (uiState.librarySourceMode != LibrarySourceMode.LOCAL) {
                     viewModel.openPosterListPicker(item, selectedPoster.addonBaseUrl)
                 } else {
                     viewModel.togglePosterLibrary(item, selectedPoster.addonBaseUrl)
@@ -269,22 +476,45 @@ fun HomeScreen(
                 posterOptionsTarget = null
             },
             onToggleWatched = {
-                viewModel.togglePosterMovieWatched(item)
+                if (isMovie) {
+                    viewModel.togglePosterMovieWatched(item)
+                } else {
+                    viewModel.togglePosterSeriesWatched(item)
+                }
                 posterOptionsTarget = null
             }
         )
     }
 
     if (uiState.showPosterListPicker) {
+        val localTab = LibraryListTab(
+            key = LOCAL_LIBRARY_LIST_KEY,
+            title = stringResource(R.string.trakt_library_source_nuvio),
+            type = LibraryListTab.Type.WATCHLIST
+        )
+        val contentType = uiState.posterListPickerContentType.orEmpty()
+        val destinationTabs = uiState.libraryListTabs.filter { tab ->
+            tab.supportsMembershipFor(contentType)
+        }
         HomeLibraryListPickerDialog(
             title = uiState.posterListPickerTitle ?: stringResource(R.string.detail_lists_fallback),
-            tabs = uiState.libraryListTabs,
+            tabs = listOf(localTab) + destinationTabs,
             membership = uiState.posterListPickerMembership,
             isPending = uiState.posterListPickerPending,
             error = uiState.posterListPickerError,
             onToggle = { key -> viewModel.togglePosterListPickerMembership(key) },
             onSave = { viewModel.savePosterListPickerMembership() },
             onDismiss = { viewModel.dismissPosterListPicker() }
+        )
+    }
+
+    if (uiState.posterListPickerRemovalConfirmations.isNotEmpty()) {
+        TrackingRemovalConfirmationDialog(
+            itemTitle = uiState.posterListPickerTitle.orEmpty(),
+            confirmations = uiState.posterListPickerRemovalConfirmations,
+            isPending = uiState.posterListPickerPending,
+            onConfirm = viewModel::confirmPosterListPickerRemoval,
+            onDismiss = viewModel::cancelPosterListPickerRemoval
         )
     }
 }
@@ -300,14 +530,17 @@ private fun ClassicHomeRoute(
     onContinueWatchingPlayManually: (ContinueWatchingItem) -> Unit,
     showContinueWatchingManualPlayOption: Boolean,
     onNavigateToCatalogSeeAll: (String, String, String) -> Unit,
+    onNavigateToFolderDetail: (String, String) -> Unit = { _, _ -> },
     isCatalogItemWatched: (MetaPreview) -> Boolean,
     onCatalogItemLongPress: (MetaPreview, String) -> Unit
 ) {
     val focusState by viewModel.focusState.collectAsStateWithLifecycle()
+    val scrollToTopTrigger by viewModel.scrollToTopTrigger.collectAsStateWithLifecycle()
     ClassicHomeContent(
         uiState = uiState,
         posterCardStyle = posterCardStyle,
         focusState = focusState,
+        scrollToTopTrigger = scrollToTopTrigger,
         trailerPreviewUrls = viewModel.trailerPreviewUrls,
         trailerPreviewAudioUrls = viewModel.trailerPreviewAudioUrls,
         onNavigateToDetail = onNavigateToDetail,
@@ -316,6 +549,7 @@ private fun ClassicHomeRoute(
         onContinueWatchingPlayManually = onContinueWatchingPlayManually,
         showContinueWatchingManualPlayOption = showContinueWatchingManualPlayOption,
         onNavigateToCatalogSeeAll = onNavigateToCatalogSeeAll,
+        onNavigateToFolderDetail = onNavigateToFolderDetail,
         onRemoveContinueWatching = { contentId, season, episode, isNextUp ->
             viewModel.onEvent(HomeEvent.OnRemoveContinueWatching(contentId, season, episode, isNextUp))
         },
@@ -327,8 +561,16 @@ private fun ClassicHomeRoute(
         onItemFocus = { item ->
             viewModel.onItemFocus(item)
         },
-        onSaveFocusState = { vi, vo, ri, ii, m ->
-            viewModel.saveFocusState(vi, vo, ri, ii, m)
+        onSaveFocusState = { vi, vo, rk, ikm, m, ri, ii ->
+            viewModel.saveFocusState(vi, vo, rk, ikm, m, ri, ii)
+            // Authoritative: this is the row that actually held focus when Home went away.
+            viewModel.setLiveFocusedRowKey(rk)
+        },
+        onFocusedRowKeyChanged = remember(viewModel) {
+            { key: String? -> viewModel.setLiveFocusedRowKey(key) }
+        },
+        onRequestLazyCatalogLoad = remember(viewModel) {
+            { catalogKey: String -> viewModel.requestLazyCatalogLoad(catalogKey) }
         }
     )
 }
@@ -344,30 +586,43 @@ private fun GridHomeRoute(
     onContinueWatchingPlayManually: (ContinueWatchingItem) -> Unit,
     showContinueWatchingManualPlayOption: Boolean,
     onNavigateToCatalogSeeAll: (String, String, String) -> Unit,
+    onNavigateToFolderDetail: (String, String) -> Unit = { _, _ -> },
     isCatalogItemWatched: (MetaPreview) -> Boolean,
     onCatalogItemLongPress: (MetaPreview, String) -> Unit
 ) {
     val gridFocusState by viewModel.gridFocusState.collectAsStateWithLifecycle()
+    val scrollToTopTrigger by viewModel.scrollToTopTrigger.collectAsStateWithLifecycle()
     GridHomeContent(
+        onFocusedRowKeyChanged = remember(viewModel) {
+            { key: String? -> viewModel.setLiveFocusedRowKey(key) }
+        },
         uiState = uiState,
         posterCardStyle = posterCardStyle,
         gridFocusState = gridFocusState,
+        scrollToTopTrigger = scrollToTopTrigger,
         onNavigateToDetail = onNavigateToDetail,
         onContinueWatchingClick = onContinueWatchingClick,
         onContinueWatchingStartFromBeginning = onContinueWatchingStartFromBeginning,
         onContinueWatchingPlayManually = onContinueWatchingPlayManually,
         showContinueWatchingManualPlayOption = showContinueWatchingManualPlayOption,
         onNavigateToCatalogSeeAll = onNavigateToCatalogSeeAll,
-        onRemoveContinueWatching = { contentId, season, episode, isNextUp ->
-            viewModel.onEvent(HomeEvent.OnRemoveContinueWatching(contentId, season, episode, isNextUp))
+        onNavigateToFolderDetail = onNavigateToFolderDetail,
+        onRemoveContinueWatching = remember(viewModel) {
+            { contentId, season, episode, isNextUp ->
+                viewModel.onEvent(HomeEvent.OnRemoveContinueWatching(contentId, season, episode, isNextUp))
+            }
         },
         isCatalogItemWatched = isCatalogItemWatched,
         onCatalogItemLongPress = onCatalogItemLongPress,
-        onItemFocus = { item ->
-            viewModel.onItemFocus(item)
+        onItemFocus = remember(viewModel) {
+            { item ->
+                viewModel.onItemFocus(item)
+            }
         },
-        onSaveGridFocusState = { vi, vo ->
-            viewModel.saveGridFocusState(vi, vo)
+        onSaveGridFocusState = remember(viewModel) {
+            { vi, vo, key ->
+                viewModel.saveGridFocusState(vi, vo, focusedItemKey = key)
+            }
         }
     )
 }
@@ -381,11 +636,17 @@ private fun ModernHomeRoute(
     onContinueWatchingStartFromBeginning: (ContinueWatchingItem) -> Unit,
     onContinueWatchingPlayManually: (ContinueWatchingItem) -> Unit,
     showContinueWatchingManualPlayOption: Boolean,
+    onNavigateToFolderDetail: (String, String) -> Unit = { _, _ -> },
     isCatalogItemWatched: (MetaPreview) -> Boolean,
     onCatalogItemLongPress: (MetaPreview, String) -> Unit
 ) {
     val focusState by viewModel.focusState.collectAsStateWithLifecycle()
+    val scrollToTopTrigger by viewModel.scrollToTopTrigger.collectAsStateWithLifecycle()
+    val modernPresentation by viewModel.modernHomePresentation.collectAsStateWithLifecycle()
     val enrichingItemId by viewModel.enrichingItemId.collectAsStateWithLifecycle()
+    val lastEnrichedPreview by viewModel.lastEnrichedPreview.collectAsStateWithLifecycle()
+    val enrichedPreviews by viewModel.enrichedPreviews.collectAsStateWithLifecycle()
+    val failedEnrichmentIds by viewModel.failedEnrichmentIds.collectAsStateWithLifecycle()
     val requestTrailerPreview = remember(viewModel) {
         { itemId: String, title: String, releaseInfo: String?, apiType: String ->
             viewModel.requestTrailerPreview(itemId, title, releaseInfo, apiType)
@@ -402,8 +663,10 @@ private fun ModernHomeRoute(
         }
     }
     val saveModernFocusState = remember(viewModel) {
-        { vi: Int, vo: Int, ri: Int, ii: Int, m: Map<String, Int> ->
-            viewModel.saveFocusState(vi, vo, ri, ii, m)
+        { vi: Int, vo: Int, rk: String?, ikm: Map<String, String>, m: Map<String, Int>, ri: Int, ii: Int ->
+            viewModel.saveFocusState(vi, vo, rk, ikm, m, ri, ii)
+            // Authoritative: this is the row that actually held focus when Home went away.
+            viewModel.setLiveFocusedRowKey(rk)
         }
     }
     val preloadAdjacentItem = remember(viewModel) {
@@ -413,8 +676,13 @@ private fun ModernHomeRoute(
     }
     ModernHomeContent(
         uiState = uiState,
+        modernPresentation = modernPresentation,
         focusState = focusState,
+        scrollToTopTrigger = scrollToTopTrigger,
         enrichingItemId = enrichingItemId,
+        lastEnrichedPreview = lastEnrichedPreview,
+        enrichedPreviews = enrichedPreviews,
+        failedEnrichmentIds = failedEnrichmentIds,
         trailerPreviewUrls = viewModel.trailerPreviewUrls,
         trailerPreviewAudioUrls = viewModel.trailerPreviewAudioUrls,
         onNavigateToDetail = onNavigateToDetail,
@@ -427,11 +695,18 @@ private fun ModernHomeRoute(
         onRemoveContinueWatching = removeContinueWatching,
         isCatalogItemWatched = isCatalogItemWatched,
         onCatalogItemLongPress = onCatalogItemLongPress,
-        onItemFocus = { item ->
-            viewModel.onItemFocus(item)
+        onNavigateToFolderDetail = onNavigateToFolderDetail,
+        onItemFocus = remember(viewModel) {
+            { item -> viewModel.onItemFocus(item) }
         },
         onPreloadAdjacentItem = preloadAdjacentItem,
-        onSaveFocusState = saveModernFocusState
+        onSaveFocusState = saveModernFocusState,
+        onFocusedRowKeyChanged = remember(viewModel) {
+            { key: String? -> viewModel.setLiveFocusedRowKey(key) }
+        },
+        onRequestLazyCatalogLoad = remember(viewModel) {
+            { catalogKey: String -> viewModel.requestLazyCatalogLoad(catalogKey) }
+        }
     )
 }
 
@@ -443,6 +718,7 @@ private fun HomePosterOptionsDialog(
     isLibraryPending: Boolean,
     showManageLists: Boolean,
     isMovie: Boolean,
+    isSeries: Boolean = false,
     isWatched: Boolean,
     isWatchedPending: Boolean,
     onDismiss: () -> Unit,
@@ -467,8 +743,8 @@ private fun HomePosterOptionsDialog(
                 .fillMaxWidth()
                 .focusRequester(primaryFocusRequester),
             colors = ButtonDefaults.colors(
-                containerColor = NuvioColors.BackgroundCard,
-                contentColor = NuvioColors.TextPrimary
+                containerColor = NuvioTheme.colors.BackgroundCard,
+                contentColor = NuvioTheme.colors.TextPrimary
             )
         ) {
             Text(stringResource(R.string.cw_action_go_to_details))
@@ -479,8 +755,8 @@ private fun HomePosterOptionsDialog(
             enabled = !isLibraryPending,
             modifier = Modifier.fillMaxWidth(),
             colors = ButtonDefaults.colors(
-                containerColor = NuvioColors.BackgroundCard,
-                contentColor = NuvioColors.TextPrimary
+                containerColor = NuvioTheme.colors.BackgroundCard,
+                contentColor = NuvioTheme.colors.TextPrimary
             )
         ) {
             Text(
@@ -496,14 +772,14 @@ private fun HomePosterOptionsDialog(
             )
         }
 
-        if (isMovie) {
+        if (isMovie || isSeries) {
             Button(
                 onClick = onToggleWatched,
                 enabled = !isWatchedPending,
                 modifier = Modifier.fillMaxWidth(),
                 colors = ButtonDefaults.colors(
-                    containerColor = NuvioColors.BackgroundCard,
-                    contentColor = NuvioColors.TextPrimary
+                    containerColor = NuvioTheme.colors.BackgroundCard,
+                    contentColor = NuvioTheme.colors.TextPrimary
                 )
             ) {
                 Text(
@@ -558,7 +834,7 @@ private fun HomeLibraryListPickerDialog(
         ) {
             items(tabs, key = { it.key }) { tab ->
                 val selected = membership[tab.key] == true
-                val titleText = if (selected) "\u2713 ${tab.title}" else tab.title
+                val titleText = if (selected) "\u2713 ${tab.localizedTitle()}" else tab.localizedTitle()
                 Button(
                     onClick = { onToggle(tab.key) },
                     enabled = !isPending,
@@ -570,8 +846,8 @@ private fun HomeLibraryListPickerDialog(
                         Modifier.fillMaxWidth()
                     },
                     colors = ButtonDefaults.colors(
-                        containerColor = if (selected) NuvioColors.FocusBackground else NuvioColors.BackgroundCard,
-                        contentColor = NuvioColors.TextPrimary
+                        containerColor = if (selected) NuvioTheme.colors.FocusBackground else NuvioTheme.colors.BackgroundCard,
+                        contentColor = NuvioTheme.colors.TextPrimary
                     )
                 ) {
                     Text(
@@ -583,15 +859,15 @@ private fun HomeLibraryListPickerDialog(
             }
         }
 
-        Divider(color = NuvioColors.Border, thickness = 1.dp)
+        Divider(color = NuvioTheme.colors.Border, thickness = NuvioTheme.spacing.hairline)
 
         Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterEnd) {
             Button(
                 onClick = onSave,
                 enabled = !isPending,
                 colors = ButtonDefaults.colors(
-                    containerColor = NuvioColors.BackgroundCard,
-                    contentColor = NuvioColors.TextPrimary
+                    containerColor = NuvioTheme.colors.BackgroundCard,
+                    contentColor = NuvioTheme.colors.TextPrimary
                 )
             ) {
                 Text(if (isPending) stringResource(R.string.action_saving) else stringResource(R.string.action_save))

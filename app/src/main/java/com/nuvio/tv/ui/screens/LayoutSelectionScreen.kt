@@ -2,6 +2,8 @@
 
 package com.nuvio.tv.ui.screens
 
+import com.nuvio.tv.ui.theme.NuvioTheme
+
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -27,6 +29,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
@@ -46,7 +50,6 @@ import com.nuvio.tv.ui.components.GridLayoutPreview
 import com.nuvio.tv.ui.components.ModernLayoutPreview
 import com.nuvio.tv.ui.screens.settings.LayoutSettingsEvent
 import com.nuvio.tv.ui.screens.settings.LayoutSettingsViewModel
-import com.nuvio.tv.ui.theme.NuvioColors
 import androidx.compose.ui.res.stringResource
 import com.nuvio.tv.R
 
@@ -57,34 +60,39 @@ fun LayoutSelectionScreen(
 ) {
     val uiState by viewModel.uiState.collectAsState()
     var selectedLayout by remember { mutableStateOf(HomeLayout.MODERN) }
+    val continueFocusRequester = remember { FocusRequester() }
+
     LaunchedEffect(uiState.selectedLayout) {
         selectedLayout = uiState.selectedLayout
+    }
+
+    LaunchedEffect(Unit) {
+        continueFocusRequester.requestFocus()
     }
 
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(NuvioColors.Background)
     ) {
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(horizontal = 80.dp, vertical = 48.dp),
+                .padding(horizontal = 80.dp, vertical = NuvioTheme.spacing.xxxl),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
             // Header
             Text(
                 text = stringResource(R.string.layout_selection_welcome),
                 style = MaterialTheme.typography.headlineLarge,
-                color = NuvioColors.TextPrimary
+                color = NuvioTheme.colors.TextPrimary
             )
 
-            Spacer(modifier = Modifier.height(8.dp))
+            Spacer(modifier = Modifier.height(NuvioTheme.spacing.sm))
 
             Text(
                 text = stringResource(R.string.layout_selection_subtitle),
                 style = MaterialTheme.typography.bodyLarge,
-                color = NuvioColors.TextSecondary
+                color = NuvioTheme.colors.TextSecondary
             )
 
             Spacer(modifier = Modifier.height(40.dp))
@@ -94,7 +102,7 @@ fun LayoutSelectionScreen(
                 modifier = Modifier
                     .fillMaxWidth()
                     .weight(1f),
-                horizontalArrangement = Arrangement.spacedBy(32.dp, Alignment.CenterHorizontally)
+                horizontalArrangement = Arrangement.spacedBy(NuvioTheme.spacing.xxl, Alignment.CenterHorizontally)
             ) {
                 LayoutOptionCard(
                     layout = HomeLayout.MODERN,
@@ -118,7 +126,7 @@ fun LayoutSelectionScreen(
                 )
             }
 
-            Spacer(modifier = Modifier.height(24.dp))
+            Spacer(modifier = Modifier.height(NuvioTheme.spacing.xl))
 
             // Continue button
             Button(
@@ -128,18 +136,19 @@ fun LayoutSelectionScreen(
                 },
                 modifier = Modifier
                     .width(200.dp)
-                    .height(48.dp),
+                    .height(NuvioTheme.spacing.xxxl)
+                    .focusRequester(continueFocusRequester),
                 shape = ButtonDefaults.shape(
-                    shape = RoundedCornerShape(24.dp)
+                    shape = RoundedCornerShape(NuvioTheme.spacing.xl)
                 ),
                 colors = ButtonDefaults.colors(
-                    containerColor = NuvioColors.Primary,
-                    focusedContainerColor = NuvioColors.FocusBackground
+                    containerColor = NuvioTheme.colors.Primary,
+                    focusedContainerColor = NuvioTheme.colors.FocusBackground
                 ),
                 border = ButtonDefaults.border(
                     focusedBorder = Border(
-                        border = BorderStroke(2.dp, NuvioColors.FocusRing),
-                        shape = RoundedCornerShape(24.dp)
+                        border = NuvioTheme.focusRing.border(NuvioTheme.spacing.xxs),
+                        shape = RoundedCornerShape(NuvioTheme.spacing.xl)
                     )
                 )
             ) {
@@ -172,24 +181,24 @@ private fun LayoutOptionCard(
         modifier = modifier
             .onFocusChanged { isFocused = it.isFocused },
         colors = CardDefaults.colors(
-            containerColor = NuvioColors.BackgroundCard,
-            focusedContainerColor = NuvioColors.BackgroundCard
+            containerColor = NuvioTheme.colors.BackgroundCard,
+            focusedContainerColor = NuvioTheme.colors.BackgroundCard
         ),
         border = CardDefaults.border(
             border = Border.None,
             focusedBorder = Border(
-                border = BorderStroke(2.dp, NuvioColors.FocusRing),
-                shape = RoundedCornerShape(16.dp)
+                border = NuvioTheme.focusRing.border(NuvioTheme.spacing.xxs),
+                shape = RoundedCornerShape(NuvioTheme.radii.xl)
             )
         ),
-        shape = CardDefaults.shape(RoundedCornerShape(16.dp)),
+        shape = CardDefaults.shape(RoundedCornerShape(NuvioTheme.radii.xl)),
         scale = CardDefaults.scale(focusedScale = 1.03f)
     ) {
         Box(modifier = Modifier.fillMaxWidth()) {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(16.dp),
+                    .padding(NuvioTheme.spacing.lg),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
                 // Animated preview
@@ -211,7 +220,7 @@ private fun LayoutOptionCard(
                     }
                 }
 
-                Spacer(modifier = Modifier.height(16.dp))
+                Spacer(modifier = Modifier.height(NuvioTheme.spacing.lg))
 
                 Text(
                     text = when (layout) {
@@ -220,10 +229,10 @@ private fun LayoutOptionCard(
                         HomeLayout.MODERN -> stringResource(R.string.layout_modern)
                     },
                     style = MaterialTheme.typography.titleLarge,
-                    color = if (isSelected || isFocused) NuvioColors.TextPrimary else NuvioColors.TextSecondary
+                    color = if (isSelected || isFocused) NuvioTheme.colors.TextPrimary else NuvioTheme.colors.TextSecondary
                 )
 
-            Spacer(modifier = Modifier.height(4.dp))
+            Spacer(modifier = Modifier.height(NuvioTheme.spacing.xs))
 
             Text(
                 text = when (layout) {
@@ -232,19 +241,19 @@ private fun LayoutOptionCard(
                     HomeLayout.MODERN -> stringResource(R.string.layout_modern_desc)
                 },
                 style = MaterialTheme.typography.bodySmall,
-                color = NuvioColors.TextTertiary
+                color = NuvioTheme.colors.TextTertiary
             )
             }
 
             if (isSelected) {
                 Icon(
                     imageVector = Icons.Default.Check,
-                    contentDescription = "Selected",
-                    tint = NuvioColors.FocusRing,
+                    contentDescription = stringResource(R.string.cd_selected),
+                    tint = NuvioTheme.colors.FocusRing,
                     modifier = Modifier
                         .align(Alignment.TopEnd)
-                        .padding(8.dp)
-                        .size(24.dp)
+                        .padding(NuvioTheme.spacing.sm)
+                        .size(NuvioTheme.spacing.xl)
                 )
             }
         }

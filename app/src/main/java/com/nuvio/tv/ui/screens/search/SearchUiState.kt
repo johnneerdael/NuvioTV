@@ -3,7 +3,22 @@ package com.nuvio.tv.ui.screens.search
 import androidx.compose.runtime.Immutable
 import com.nuvio.tv.domain.model.Addon
 import com.nuvio.tv.domain.model.CatalogRow
+import com.nuvio.tv.domain.model.DiscoverLocation
 import com.nuvio.tv.domain.model.MetaPreview
+
+internal const val MIN_SEARCH_QUERY_LENGTH = 2
+
+internal fun submittedSearchQuery(rawQuery: String): String =
+    rawQuery.trim().takeIf { it.length >= MIN_SEARCH_QUERY_LENGTH }.orEmpty()
+
+internal fun shouldShowDiscoverInSearch(
+    discoverLocation: DiscoverLocation,
+    query: String,
+    submittedQuery: String
+): Boolean =
+    discoverLocation == DiscoverLocation.IN_SEARCH &&
+        query.trim().length < MIN_SEARCH_QUERY_LENGTH &&
+        submittedQuery.isBlank()
 
 @Immutable
 data class SearchUiState(
@@ -13,7 +28,7 @@ data class SearchUiState(
     val error: String? = null,
     val catalogRows: List<CatalogRow> = emptyList(),
     val installedAddons: List<Addon> = emptyList(),
-    val discoverEnabled: Boolean = true,
+    val discoverLocation: DiscoverLocation = DiscoverLocation.IN_SEARCH,
     val discoverInitialized: Boolean = false,
     val discoverLoading: Boolean = false,
     val discoverLoadingMore: Boolean = false,
@@ -31,6 +46,7 @@ data class SearchUiState(
     val posterCardWidthDp: Int = 126,
     val posterCardHeightDp: Int = 189,
     val posterCardCornerRadiusDp: Int = 12,
+    val recentSearches: List<String> = emptyList(),
     val suggestions: List<String> = emptyList()
 )
 

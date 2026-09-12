@@ -4,8 +4,15 @@ import android.net.Uri
 import android.util.Log
 import com.google.gson.Gson
 import com.nuvio.tv.BuildConfig
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.withTimeout
 import okhttp3.Headers
 import okhttp3.OkHttpClient
@@ -13,6 +20,7 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.net.URL
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -21,7 +29,7 @@ private const val EXTRACTOR_TIMEOUT_MS = 30_000L
 private const val DEFAULT_USER_AGENT =
     "Mozilla/5.0 (Linux; Android 12; Android TV) AppleWebKit/537.36 " +
         "(KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
-private const val PREFERRED_SEPARATE_CLIENT = "android_vr"
+private const val PREFERRED_SEPARATE_CLIENT = "visionos"
 
 private val VIDEO_ID_REGEX = Regex("^[a-zA-Z0-9_-]{11}$")
 private val API_KEY_REGEX = Regex("\"INNERTUBE_API_KEY\":\"([^\"]+)\"")
@@ -42,7 +50,7 @@ private data class WatchConfig(
     val visitorData: String?
 )
 
-private data class StreamCandidate(
+internal data class StreamCandidate(
     val client: String,
     val priority: Int,
     val url: String,
@@ -51,7 +59,11 @@ private data class StreamCandidate(
     val itag: String,
     val height: Int,
     val fps: Int,
-    val ext: String
+    val ext: String,
+    // Only meaningful for audio candidates: false means this format is an
+    // alternate-language dub track, not the video's original/default audio.
+    // Always true for video/progressive candidates, so it never affects them.
+    val isDefaultAudioTrack: Boolean = true
 )
 
 private data class ManifestBestVariant(
@@ -77,20 +89,18 @@ private val DEFAULT_HEADERS = mapOf(
 
 private val CLIENTS = listOf(
     YouTubeClient(
-        key = "android_vr",
-        id = "28",
-        version = "1.56.21",
-        userAgent = "com.google.android.apps.youtube.vr.oculus/1.56.21 " +
-            "(Linux; U; Android 12; en_US; Quest 3; Build/SQ3A.220605.009.A1) gzip",
+        key = "visionos",
+        id = "101",
+        version = "1.02",
+        userAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_7_3) AppleWebKit/605.1.15 " +
+            "(KHTML, like Gecko) Version/26.0 Safari/605.1.15",
         context = mapOf(
-            "clientName" to "ANDROID_VR",
-            "clientVersion" to "1.56.21",
-            "deviceMake" to "Oculus",
-            "deviceModel" to "Quest 3",
-            "osName" to "Android",
-            "osVersion" to "12",
-            "platform" to "MOBILE",
-            "androidSdkVersion" to 32,
+            "clientName" to "VISIONOS",
+            "clientVersion" to "1.02",
+            "deviceMake" to "Apple",
+            "deviceModel" to "RealityDevice17,1",
+            "osName" to "visionOS",
+            "osVersion" to "26.5.23O471",
             "hl" to "en",
             "gl" to "US"
         ),
@@ -136,25 +146,123 @@ private val CLIENTS = listOf(
 class InAppYouTubeExtractor @Inject constructor() {
     private val gson = Gson()
 
-    private val httpClient = OkHttpClient.Builder()
-        .connectTimeout(20, TimeUnit.SECONDS)
-        .readTimeout(20, TimeUnit.SECONDS)
-        .writeTimeout(20, TimeUnit.SECONDS)
-        .followRedirects(true)
-        .followSslRedirects(true)
-        .build()
+    private val httpClient by lazy {
+        OkHttpClient.Builder()
+            .dns(com.nuvio.tv.core.network.IPv4FirstDns())
+            .connectTimeout(20, TimeUnit.SECONDS)
+            .readTimeout(20, TimeUnit.SECONDS)
+            .writeTimeout(20, TimeUnit.SECONDS)
+            .followRedirects(true)
+            .followSslRedirects(true)
+            .build()
+    }
+
+    // --- Cached watch config (api key + visitor data) ---
+    private data class CachedConfig(
+        val apiKey: String,
+        val visitorData: String?,
+        val fetchedAt: Long = System.currentTimeMillis()
+    )
+
+    private val cachedConfig = AtomicReference<CachedConfig?>(null)
+    private val configMutex = Mutex()
+
+    companion object {
+        /** How long cached visitor_data stays valid before a proactive refresh. */
+        private const val CONFIG_TTL_MS = 3 * 60 * 60 * 1000L // 3 hours
+    }
+
+    /**
+     * Returns cached watch config, fetching from watch page only if:
+     *  - No cached config exists yet (first call)
+     *  - Cache is older than CONFIG_TTL_MS
+     *  - [forceRefresh] is true (e.g. after LOGIN_REQUIRED)
+     */
+    private suspend fun ensureWatchConfig(forceRefresh: Boolean = false): CachedConfig {
+        // Fast path: return valid cache without locking
+        if (!forceRefresh) {
+            val current = cachedConfig.get()
+            if (current != null && !isConfigStale(current)) {
+                return current
+            }
+        }
+
+        // Slow path: fetch new config under mutex (only one fetch at a time)
+        return configMutex.withLock {
+            // Double-check after acquiring lock
+            if (!forceRefresh) {
+                val current = cachedConfig.get()
+                if (current != null && !isConfigStale(current)) {
+                    return@withLock current
+                }
+            }
+
+            Log.d(TAG, "Fetching watch page for visitor_data (forceRefresh=$forceRefresh)")
+            val watchUrl = "https://www.youtube.com/watch?v=dQw4w9WgXcQ&hl=en"
+            val watchResponse = performRequest(
+                url = watchUrl,
+                method = "GET",
+                headers = DEFAULT_HEADERS
+            )
+            if (!watchResponse.ok) {
+                // If we have a stale config, prefer it over failing
+                val stale = cachedConfig.get()
+                if (stale != null) {
+                    Log.w(TAG, "Watch page failed (${watchResponse.status}), using stale config")
+                    return@withLock stale
+                }
+                throw IllegalStateException("Failed to fetch watch page (${watchResponse.status})")
+            }
+
+            val parsed = getWatchConfig(watchResponse.body)
+            val apiKey = parsed.apiKey ?: "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8" // fallback key
+            val newConfig = CachedConfig(
+                apiKey = apiKey,
+                visitorData = parsed.visitorData
+            )
+            cachedConfig.set(newConfig)
+            Log.d(TAG, "Watch config cached (visitor=${!parsed.visitorData.isNullOrBlank()})")
+            newConfig
+        }
+    }
+
+    private fun isConfigStale(config: CachedConfig): Boolean {
+        return System.currentTimeMillis() - config.fetchedAt > CONFIG_TTL_MS
+    }
+
+    /** Invalidate cached config so next extraction re-fetches watch page. */
+    fun invalidateConfig() {
+        cachedConfig.set(null)
+        Log.d(TAG, "Watch config invalidated")
+    }
 
     suspend fun extractPlaybackSource(youtubeUrl: String): TrailerPlaybackSource? = withContext(Dispatchers.IO) {
         if (youtubeUrl.isBlank()) return@withContext null
 
         Log.d(TAG, "Starting Kotlin extraction for ${summarizeUrl(youtubeUrl)}")
-        val source = try {
-            withTimeout(EXTRACTOR_TIMEOUT_MS) {
-                extractPlaybackSourceInternal(youtubeUrl)
+        var source: TrailerPlaybackSource? = null
+        try {
+            source = withTimeout(EXTRACTOR_TIMEOUT_MS) {
+                extractPlaybackSourceInternal(youtubeUrl, forceRefreshConfig = false)
             }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
         } catch (error: Exception) {
             Log.w(TAG, "Kotlin extractor failed for $youtubeUrl: ${error.message}")
-            null
+        }
+
+        // Retry with fresh config if first attempt returned nothing
+        if (source == null) {
+            Log.d(TAG, "First attempt failed, retrying with fresh watch config...")
+            try {
+                source = withTimeout(EXTRACTOR_TIMEOUT_MS) {
+                    extractPlaybackSourceInternal(youtubeUrl, forceRefreshConfig = true)
+                }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (error: Exception) {
+                Log.w(TAG, "Kotlin extractor retry failed for $youtubeUrl: ${error.message}")
+            }
         }
 
         if (source == null) {
@@ -170,37 +278,44 @@ class InAppYouTubeExtractor @Inject constructor() {
         source
     }
 
-    private fun extractPlaybackSourceInternal(youtubeUrl: String): TrailerPlaybackSource? {
+    private suspend fun extractPlaybackSourceInternal(
+        youtubeUrl: String,
+        forceRefreshConfig: Boolean
+    ): TrailerPlaybackSource? {
         val videoId = extractVideoId(youtubeUrl) ?: return null
 
-        val watchUrl = "https://www.youtube.com/watch?v=$videoId&hl=en"
-        val watchResponse = performRequest(
-            url = watchUrl,
-            method = "GET",
-            headers = DEFAULT_HEADERS
-        )
-        if (!watchResponse.ok) {
-            throw IllegalStateException("Failed to fetch watch page (${watchResponse.status})")
-        }
-
-        val watchConfig = getWatchConfig(watchResponse.body)
-        val apiKey = watchConfig.apiKey
-            ?: throw IllegalStateException("Unable to extract INNERTUBE_API_KEY")
+        // Use cached config instead of fetching watch page every time
+        val config = ensureWatchConfig(forceRefresh = forceRefreshConfig)
+        Log.d(TAG, "Using config: apiKey=${config.apiKey.take(10)}... visitor=${!config.visitorData.isNullOrBlank()}")
 
         val progressive = mutableListOf<StreamCandidate>()
         val adaptiveVideo = mutableListOf<StreamCandidate>()
         val adaptiveAudio = mutableListOf<StreamCandidate>()
         val manifestUrls = mutableListOf<Triple<String, Int, String>>()
+        var loginRequiredCount = 0
 
         for (client in CLIENTS) {
+            kotlinx.coroutines.yield()
             try {
                 val playerResponse = fetchPlayerResponse(
-                    apiKey = apiKey,
+                    apiKey = config.apiKey,
                     videoId = videoId,
                     client = client,
-                    visitorData = watchConfig.visitorData,
+                    visitorData = config.visitorData,
                     cookieHeader = null
                 )
+
+                // Check for LOGIN_REQUIRED which means visitor_data is stale
+                val playabilityStatus = playerResponse.mapValue("playabilityStatus")
+                val status = playabilityStatus?.stringValue("status")
+                if (status == "LOGIN_REQUIRED") {
+                    loginRequiredCount++
+                    Log.w(TAG, "Client ${client.key}: LOGIN_REQUIRED (visitor may be stale)")
+                    continue
+                }
+                if (status != null && status != "OK") {
+                    continue
+                }
 
                 val streamingData = playerResponse.mapValue("streamingData") ?: continue
                 val hlsManifestUrl = streamingData.stringValue("hlsManifestUrl")
@@ -265,6 +380,12 @@ class InAppYouTubeExtractor @Inject constructor() {
                             ?: format.numberValue("averageBitrate")
                             ?: 0.0
                         val asr = format.numberValue("audioSampleRate") ?: 0.0
+                        // Multi-language uploads (common for major-studio trailers)
+                        // expose each dub as a separate adaptiveFormats entry with an
+                        // audioTrack.audioIsDefault flag. Formats with no audioTrack
+                        // are the only audio for that video, so treat them as default.
+                        val isDefaultAudioTrack = format.mapValue("audioTrack")
+                            ?.booleanValue("audioIsDefault") ?: true
 
                         adaptiveAudio += StreamCandidate(
                             client = client.key,
@@ -275,7 +396,8 @@ class InAppYouTubeExtractor @Inject constructor() {
                             itag = format.stringValue("itag").orEmpty(),
                             height = 0,
                             fps = 0,
-                            ext = if (mimeType.contains("webm")) "webm" else "m4a"
+                            ext = if (mimeType.contains("webm")) "webm" else "m4a",
+                            isDefaultAudioTrack = isDefaultAudioTrack
                         )
                     }
                 }
@@ -284,6 +406,14 @@ class InAppYouTubeExtractor @Inject constructor() {
                     Log.w(TAG, "Client ${client.key} failed: ${error.message}")
                 }
             }
+
+        }
+
+        // If all clients returned LOGIN_REQUIRED, invalidate config for next attempt
+        if (loginRequiredCount == CLIENTS.size) {
+            Log.w(TAG, "All ${CLIENTS.size} clients returned LOGIN_REQUIRED, invalidating config")
+            invalidateConfig()
+            return null
         }
 
         if (manifestUrls.isEmpty() && progressive.isEmpty() && adaptiveVideo.isEmpty() && adaptiveAudio.isEmpty()) {
@@ -320,32 +450,27 @@ class InAppYouTubeExtractor @Inject constructor() {
         val bestVideo = pickBestForClient(adaptiveVideo, PREFERRED_SEPARATE_CLIENT)
         val bestAudio = pickBestForClient(adaptiveAudio, PREFERRED_SEPARATE_CLIENT)
 
-        val bestCombinedIsManifest = bestManifest != null &&
-            (bestProgressive == null || bestManifest.height > bestProgressive.height)
+        // Try adaptive video + audio first (best quality, separate streams)
+        kotlinx.coroutines.yield()
+        val resolvedVideo = bestVideo?.url?.let { resolveReachableUrl(it) }
+        val resolvedAudio = if (resolvedVideo != null) bestAudio?.url?.let { resolveReachableUrl(it) } else null
 
-        val combinedUrl = if (bestCombinedIsManifest) {
-            bestManifest.manifestUrl
-        } else {
-            bestProgressive?.url
+        if (resolvedVideo != null) {
+            return TrailerPlaybackSource(videoUrl = resolvedVideo, audioUrl = resolvedAudio)
         }
 
-        val videoUrl = bestVideo?.url ?: combinedUrl ?: return null
-        val audioUrl = bestAudio?.url
-
-        if (BuildConfig.DEBUG) {
-            Log.d(
-                TAG,
-                "Kotlin selection video=${summarizeUrl(videoUrl)} " +
-                    "audioPresent=${!audioUrl.isNullOrBlank()} " +
-                    "progressiveCount=${progressive.size} " +
-                    "adaptiveVideoCount=${adaptiveVideo.size} adaptiveAudioCount=${adaptiveAudio.size}"
-            )
+        // Adaptive failed (403) — fall back to HLS manifest (1080p, always works for COPPA/kids content)
+        if (bestManifest != null) {
+            return TrailerPlaybackSource(videoUrl = bestManifest.manifestUrl, audioUrl = null)
         }
 
-        return TrailerPlaybackSource(
-            videoUrl = videoUrl,
-            audioUrl = audioUrl
-        )
+        // No HLS available — try progressive (combined video+audio, usually low quality)
+        val resolvedProgressive = bestProgressive?.url?.let { resolveReachableUrl(it) }
+        if (resolvedProgressive != null) {
+            return TrailerPlaybackSource(videoUrl = resolvedProgressive, audioUrl = null)
+        }
+
+        return null
     }
 
     private fun extractVideoId(input: String): String? {
@@ -412,15 +537,15 @@ class InAppYouTubeExtractor @Inject constructor() {
             if (!cookieHeader.isNullOrBlank()) put("cookie", cookieHeader)
         }
 
-        val payload = mapOf(
-            "videoId" to videoId,
-            "contentCheckOk" to true,
-            "racyCheckOk" to true,
-            "context" to mapOf("client" to client.context),
-            "playbackContext" to mapOf(
+        val payload = buildMap<String, Any> {
+            put("videoId", videoId)
+            put("contentCheckOk", true)
+            put("racyCheckOk", true)
+            put("context", mapOf("client" to client.context))
+            put("playbackContext", mapOf(
                 "contentPlaybackContext" to mapOf("html5Preference" to "HTML5_PREF_WANTS")
-            )
-        )
+            ))
+        }
 
         val response = performRequest(
             url = endpoint,
@@ -429,8 +554,7 @@ class InAppYouTubeExtractor @Inject constructor() {
             body = gson.toJson(payload)
         )
         if (!response.ok) {
-            val preview = response.body.take(200)
-            throw IllegalStateException("player API ${client.key} failed (${response.status}): $preview")
+            throw IllegalStateException("player API ${client.key} failed (${response.status})")
         }
 
         val parsed = gson.fromJson(response.body, Map::class.java)
@@ -567,9 +691,10 @@ class InAppYouTubeExtractor @Inject constructor() {
         return bitrate * 1_000_000.0 + audioSampleRate
     }
 
-    private fun sortCandidates(items: List<StreamCandidate>): List<StreamCandidate> {
+    internal fun sortCandidates(items: List<StreamCandidate>): List<StreamCandidate> {
         return items.sortedWith(
-            compareByDescending<StreamCandidate> { it.score }
+            compareBy<StreamCandidate> { if (it.isDefaultAudioTrack) 0 else 1 }
+                .thenByDescending { it.score }
                 .thenBy { if (it.hasN) 1 else 0 }
                 .thenBy { containerPreference(it.ext) }
                 .thenBy { it.priority }
@@ -590,6 +715,75 @@ class InAppYouTubeExtractor @Inject constructor() {
             return sortCandidates(sameClient).firstOrNull()
         }
         return sortCandidates(items).firstOrNull()
+    }
+
+    /**
+     * Probes CDN nodes for the given googlevideo URL and returns the first reachable one.
+     * Returns null if no CDN node responds successfully (all return 403/timeout).
+     */
+    private suspend fun resolveReachableUrl(url: String): String? {
+        if (!url.contains("googlevideo.com")) return url
+        val uri = Uri.parse(url)
+        val mnParam = uri.getQueryParameter("mn") ?: return url
+        val servers = mnParam.split(",").map { it.trim() }.filter { it.isNotBlank() }
+        if (servers.size < 2) return url
+
+        val candidates = mutableListOf(url)
+        for (server in servers) {
+            val mviIndex = servers.indexOf(server)
+            val altHost = uri.host?.replaceFirst(
+                Regex("^rr\\d+---"),
+                "rr${mviIndex + 1}---"
+            )?.replaceFirst(
+                Regex("sn-[a-z0-9]+-[a-z0-9]+"),
+                server
+            ) ?: continue
+            if (altHost == uri.host) continue
+            candidates += url.replace(uri.host!!, altHost)
+        }
+
+        if (candidates.size == 1) {
+            // Single candidate — verify it's reachable
+            return if (isUrlReachable(candidates[0])) candidates[0] else null
+        }
+
+        val result = CompletableDeferred<String>()
+        val probeScope = CoroutineScope(Dispatchers.IO)
+        candidates.forEach { candidate ->
+            probeScope.launch {
+                val reachable = isUrlReachable(candidate)
+                if (reachable) result.complete(candidate)
+            }
+        }
+        return try {
+            withTimeoutOrNull(2_000L) { result.await() }
+        } finally {
+            probeScope.cancel()
+        }
+    }
+
+    private val probeClient by lazy {
+        OkHttpClient.Builder()
+            .dns(com.nuvio.tv.core.network.IPv4FirstDns())
+            .connectTimeout(2, TimeUnit.SECONDS)
+            .readTimeout(2, TimeUnit.SECONDS)
+            .followRedirects(true)
+            .followSslRedirects(true)
+            .build()
+    }
+
+    private fun isUrlReachable(url: String): Boolean {
+        return runCatching {
+            val request = Request.Builder()
+                .url(url)
+                .get()
+                .header("Range", "bytes=0-0")
+                .headers(buildHeaders(DEFAULT_HEADERS))
+                .build()
+            probeClient.newCall(request).execute().use { response ->
+                response.code == 200 || response.code == 206
+            }
+        }.getOrDefault(false)
     }
 
     private fun absolutizeUrl(baseUrl: String, maybeRelative: String): String {
@@ -669,6 +863,10 @@ private fun Map<*, *>.listMapValue(key: String): List<Map<*, *>> {
 private fun Map<*, *>.stringValue(key: String): String? {
     val value = this[key] ?: return null
     return value.toString()
+}
+
+private fun Map<*, *>.booleanValue(key: String): Boolean? {
+    return this[key] as? Boolean
 }
 
 private fun Map<*, *>.numberValue(key: String): Double? {

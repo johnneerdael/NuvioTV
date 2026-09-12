@@ -4,8 +4,12 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.nuvio.tv.data.repository.GitHubContributor
 import com.nuvio.tv.data.repository.GitHubContributorsRepository
-import com.nuvio.tv.data.repository.SupporterDonation
+import com.nuvio.tv.data.repository.MembershipOverviewRepository
+import com.nuvio.tv.data.repository.DevelopmentSponsor
+import com.nuvio.tv.data.repository.SponsorsRepository
+import com.nuvio.tv.data.repository.SupporterMember
 import com.nuvio.tv.data.repository.SupportersRepository
+import com.nuvio.tv.domain.model.MembershipOverviewState
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -16,16 +20,23 @@ import javax.inject.Inject
 
 enum class SupportersContributorsTab {
     Supporters,
+    Sponsors,
     Contributors
 }
 
 data class SupportersContributorsUiState(
+    val membership: MembershipOverviewState = MembershipOverviewState(),
     val selectedTab: SupportersContributorsTab = SupportersContributorsTab.Contributors,
     val isSupportersLoading: Boolean = false,
     val hasLoadedSupporters: Boolean = false,
-    val supporters: List<SupporterDonation> = emptyList(),
+    val supporters: List<SupporterMember> = emptyList(),
     val supportersErrorMessage: String? = null,
-    val selectedSupporter: SupporterDonation? = null,
+    val selectedSupporter: SupporterMember? = null,
+    val isSponsorsLoading: Boolean = false,
+    val hasLoadedSponsors: Boolean = false,
+    val sponsors: List<DevelopmentSponsor> = emptyList(),
+    val sponsorsErrorMessage: String? = null,
+    val selectedSponsor: DevelopmentSponsor? = null,
     val isContributorsLoading: Boolean = false,
     val hasLoadedContributors: Boolean = false,
     val contributors: List<GitHubContributor> = emptyList(),
@@ -35,21 +46,35 @@ data class SupportersContributorsUiState(
 
 @HiltViewModel
 class SupportersContributorsViewModel @Inject constructor(
+    @dagger.hilt.android.qualifiers.ApplicationContext private val appContext: android.content.Context,
     private val supportersRepository: SupportersRepository,
-    private val contributorsRepository: GitHubContributorsRepository
+    private val sponsorsRepository: SponsorsRepository,
+    private val contributorsRepository: GitHubContributorsRepository,
+    private val membershipOverviewRepository: MembershipOverviewRepository
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(SupportersContributorsUiState())
     val uiState: StateFlow<SupportersContributorsUiState> = _uiState.asStateFlow()
 
     init {
+        viewModelScope.launch {
+            membershipOverviewRepository.state.collect { membership ->
+                _uiState.update { it.copy(membership = membership) }
+            }
+        }
         loadContributorsIfNeeded()
+        loadSupportersIfNeeded()
+    }
+
+    fun refreshMembership() {
+        membershipOverviewRepository.refresh()
     }
 
     fun onSelectTab(tab: SupportersContributorsTab) {
         _uiState.update { it.copy(selectedTab = tab) }
         when (tab) {
             SupportersContributorsTab.Supporters -> loadSupportersIfNeeded()
+            SupportersContributorsTab.Sponsors -> loadSponsorsIfNeeded()
             SupportersContributorsTab.Contributors -> loadContributorsIfNeeded()
         }
     }
@@ -62,12 +87,24 @@ class SupportersContributorsViewModel @Inject constructor(
         loadContributors(force = true)
     }
 
-    fun onSupporterSelected(supporter: SupporterDonation) {
+    fun retrySponsors() {
+        loadSponsors(force = true)
+    }
+
+    fun onSupporterSelected(supporter: SupporterMember) {
         _uiState.update { it.copy(selectedSupporter = supporter) }
     }
 
     fun dismissSupporterDetails() {
         _uiState.update { it.copy(selectedSupporter = null) }
+    }
+
+    fun onSponsorSelected(sponsor: DevelopmentSponsor) {
+        _uiState.update { it.copy(selectedSponsor = sponsor) }
+    }
+
+    fun dismissSponsorDetails() {
+        _uiState.update { it.copy(selectedSponsor = null) }
     }
 
     fun onContributorSelected(contributor: GitHubContributor) {
@@ -88,6 +125,12 @@ class SupportersContributorsViewModel @Inject constructor(
         val current = _uiState.value
         if (current.hasLoadedContributors || current.isContributorsLoading) return
         loadContributors(force = false)
+    }
+
+    private fun loadSponsorsIfNeeded() {
+        val current = _uiState.value
+        if (current.hasLoadedSponsors || current.isSponsorsLoading) return
+        loadSponsors(force = false)
     }
 
     private fun loadSupporters(force: Boolean) {
@@ -120,7 +163,7 @@ class SupportersContributorsViewModel @Inject constructor(
                             isSupportersLoading = false,
                             hasLoadedSupporters = false,
                             supporters = emptyList(),
-                            supportersErrorMessage = error.message ?: "Unable to load supporters."
+                            supportersErrorMessage = error.message ?: appContext.getString(com.nuvio.tv.R.string.supporters_error_load)
                         )
                     }
                 }
@@ -157,7 +200,44 @@ class SupportersContributorsViewModel @Inject constructor(
                             isContributorsLoading = false,
                             hasLoadedContributors = false,
                             contributors = emptyList(),
-                            contributorsErrorMessage = error.message ?: "Unable to load contributors."
+                            contributorsErrorMessage = error.message ?: appContext.getString(com.nuvio.tv.R.string.contributors_error_load)
+                        )
+                    }
+                }
+        }
+    }
+
+    private fun loadSponsors(force: Boolean) {
+        val current = _uiState.value
+        if (current.isSponsorsLoading) return
+        if (!force && current.hasLoadedSponsors) return
+
+        viewModelScope.launch {
+            _uiState.update {
+                it.copy(
+                    isSponsorsLoading = true,
+                    sponsorsErrorMessage = null
+                )
+            }
+
+            sponsorsRepository.getSponsors()
+                .onSuccess { sponsors ->
+                    _uiState.update {
+                        it.copy(
+                            isSponsorsLoading = false,
+                            hasLoadedSponsors = true,
+                            sponsors = sponsors,
+                            sponsorsErrorMessage = null
+                        )
+                    }
+                }
+                .onFailure { error ->
+                    _uiState.update {
+                        it.copy(
+                            isSponsorsLoading = false,
+                            hasLoadedSponsors = false,
+                            sponsors = emptyList(),
+                            sponsorsErrorMessage = error.message ?: appContext.getString(com.nuvio.tv.R.string.sponsors_error_load)
                         )
                     }
                 }

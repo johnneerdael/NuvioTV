@@ -2,8 +2,14 @@ package com.nuvio.tv.ui.screens.player
 
 import com.nuvio.tv.R
 import com.nuvio.tv.core.network.NetworkResult
+import com.nuvio.tv.data.local.AutoSkipSegmentType
+import com.nuvio.tv.data.repository.SkipInterval
+import com.nuvio.tv.domain.model.ContentType
 import com.nuvio.tv.domain.model.Meta
 import com.nuvio.tv.domain.model.Stream
+import com.nuvio.tv.domain.model.resolveContentLanguage
+import com.nuvio.tv.domain.model.normalizeLanguageCode
+import com.nuvio.tv.data.local.AudioLanguageOption
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
@@ -12,7 +18,7 @@ import kotlinx.coroutines.launch
 internal fun PlayerRuntimeController.fetchMetaDetails(id: String?, type: String?) {
     if (id.isNullOrBlank() || type.isNullOrBlank()) return
 
-    scope.launch {
+    metaFetchJob = scope.launch {
         when (
             val result = metaRepository.getMetaFromAllAddons(type = type, id = id)
                 .first { it !is NetworkResult.Loading }
@@ -21,26 +27,54 @@ internal fun PlayerRuntimeController.fetchMetaDetails(id: String?, type: String?
                 applyMetaDetails(result.data)
             }
             is NetworkResult.Error -> {
-                
             }
             NetworkResult.Loading -> {
-                
             }
         }
     }
+
+    scope.launch {
+        enrichDescriptionFromTmdb(id, type)
+    }
+}
+
+internal fun PlayerRuntimeController.initializeCloudPlaybackSequence() {
+    val playbackContext = cloudPlaybackContext ?: return
+    metaVideos = playbackContext.asVideos()
+    val currentFile = playbackContext.currentFile ?: return
+    currentVideoId = playbackContext.videoId(currentFile)
+    currentSeason = 1
+    currentEpisode = playbackContext.currentIndex + 1
+    currentEpisodeTitle = currentFile.name
+    _uiState.update {
+        it.copy(
+            currentVideoId = currentVideoId,
+            currentSeason = currentSeason,
+            currentEpisode = currentEpisode,
+            currentEpisodeTitle = currentEpisodeTitle
+        )
+    }
+    recomputeNextEpisode(resetVisibility = false)
 }
 
 internal fun PlayerRuntimeController.applyMetaDetails(meta: Meta) {
     metaVideos = meta.videos
+    metaGenres = meta.genres
+    metaCountry = meta.country
+    // Fill in content language from meta if not provided via navigation args.
+    if (contentLanguage == null) {
+        contentLanguage = meta.resolveContentLanguage()
+    }
     val description = resolveDescription(meta)
 
+    recomputeNextEpisode(resetVisibility = false)
     _uiState.update { state ->
         state.copy(
             description = description ?: state.description,
-            castMembers = if (meta.castMembers.isNotEmpty()) meta.castMembers else state.castMembers
+            castMembers = if (meta.castMembers.isNotEmpty()) meta.castMembers else state.castMembers,
+            isNextEpisodeMetadataResolved = true
         )
     }
-    recomputeNextEpisode(resetVisibility = false)
 }
 
 internal fun PlayerRuntimeController.resolveDescription(meta: Meta): String? {
@@ -60,25 +94,157 @@ internal fun PlayerRuntimeController.updateEpisodeDescription() {
         video.season == currentSeason && video.episode == currentEpisode
     }?.overview
 
-    if (!overview.isNullOrBlank()) {
-        _uiState.update { it.copy(description = overview) }
+    // Always update description when switching episodes - clear stale description
+    _uiState.update { it.copy(description = overview) }
+
+    // Push episode metadata to the MediaSession so Google Home shows the new episode.
+    updateMediaSessionMetadata()
+
+    // Cloud library IDs belong to the provider, not TMDB.
+    if (!contentType.equals("cloud", ignoreCase = true)) {
+        scope.launch {
+            enrichDescriptionFromTmdb(contentId, contentType)
+        }
     }
+}
+
+private suspend fun PlayerRuntimeController.enrichDescriptionFromTmdb(id: String?, type: String?) {
+    if (id.isNullOrBlank() || type.isNullOrBlank()) return
+    val settings = tmdbSettingsDataStore.settings.first()
+    if (!settings.enabled || !settings.useBasicInfo) return
+
+    val tmdbId = runCatching { tmdbService.ensureTmdbId(id, type) }.getOrNull() ?: return
+    val contentType = when (type.lowercase()) {
+        "series", "tv" -> ContentType.SERIES
+        else -> ContentType.MOVIE
+    }
+    val enrichment = runCatching {
+        tmdbMetadataService.fetchEnrichment(
+            tmdbId = tmdbId,
+            contentType = contentType,
+            language = settings.language
+        )
+    }.getOrNull() ?: return
+
+    val isSeries = type.lowercase() in listOf("series", "tv")
+    val season = currentSeason
+    val episode = currentEpisode
+
+    // For series, try to get episode-level overview and title from TMDB.
+    val episodeEnrichment = if (isSeries && season != null && episode != null) {
+        runCatching {
+            tmdbMetadataService.fetchEpisodeEnrichment(
+                tmdbId = tmdbId,
+                seasonNumbers = listOf(season),
+                language = settings.language
+            )[season to episode]
+        }.getOrNull()
+    } else null
+
+    val tmdbDescription = episodeEnrichment?.overview ?: enrichment.description
+    if (settings.useBasicInfo && !tmdbDescription.isNullOrBlank()) {
+        _uiState.update { it.copy(description = tmdbDescription) }
+    }
+
+    // Enrich title from TMDB (localized).
+    if (settings.useBasicInfo) {
+        val tmdbTitle = enrichment.localizedTitle
+        if (!tmdbTitle.isNullOrBlank()) {
+            _uiState.update { it.copy(title = tmdbTitle) }
+        }
+    }
+
+    // Enrich logo from TMDB if artwork is enabled.
+    if (settings.useArtwork) {
+        val tmdbLogo = enrichment.logo
+        if (!tmdbLogo.isNullOrBlank()) {
+            _uiState.update { it.copy(logo = tmdbLogo) }
+        }
+    }
+
+    // Also enrich episode title from TMDB if available.
+    if (settings.useBasicInfo) {
+        val tmdbEpisodeTitle = episodeEnrichment?.title
+        if (!tmdbEpisodeTitle.isNullOrBlank()) {
+            _uiState.update { it.copy(currentEpisodeTitle = tmdbEpisodeTitle) }
+        }
+    }
+
+    // Enrich cast from TMDB if addon didn't provide any.
+    if (settings.useBasicInfo && enrichment.castMembers.isNotEmpty()) {
+        _uiState.update { state ->
+            if (state.castMembers.isEmpty()) state.copy(castMembers = enrichment.castMembers)
+            else state
+        }
+    }
+
+    // Fill in content language from TMDB if still unknown, so "original
+    // audio" can resolve correctly even when the addon meta lacks it.
+    if (contentLanguage == null) {
+        val tmdbLang = normalizeLanguageCode(enrichment.language)
+        if (tmdbLang != null) {
+            contentLanguage = tmdbLang
+            val hasUserAudioSelection = persistedTrackPreference?.audio != null
+            if (!hasUserAudioSelection) {
+                val playerSettings = playerSettingsDataStore.playerSettings.first()
+                if (playerSettings.preferredAudioLanguage == AudioLanguageOption.ORIGINAL) {
+                    val resolved = resolvePreferredAudioLanguages(
+                        preferredAudioLanguage = playerSettings.preferredAudioLanguage,
+                        secondaryPreferredAudioLanguage = playerSettings.secondaryPreferredAudioLanguage,
+                        deviceLanguages = resolveDeviceAudioLanguages(),
+                        contentOriginalLanguage = tmdbLang
+                    )
+                    if (resolved.isNotEmpty()) {
+                        _exoPlayer?.let { player ->
+                            player.trackSelectionParameters = player.trackSelectionParameters
+                                .buildUpon()
+                                .setPreferredAudioLanguages(*resolved.toTypedArray())
+                                .build()
+                        }
+                        if (isUsingMpvEngine()) {
+                            mpvPreferredAudioLanguages = resolved
+                            mpvView?.applyAudioLanguagePreferences(resolved)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Refresh MediaSession metadata with TMDB-enriched title / artwork.
+    updateMediaSessionMetadata()
 }
 
 internal fun PlayerRuntimeController.recomputeNextEpisode(resetVisibility: Boolean) {
     val normalizedType = contentType?.lowercase()
-    if (normalizedType !in listOf("series", "tv")) {
+    if (normalizedType !in listOf("series", "tv", "other", "cloud")) {
         nextEpisodeVideo = null
-        _uiState.update {
-            it.copy(
-                nextEpisode = null,
-                showNextEpisodeCard = false,
-                nextEpisodeCardDismissed = false,
-                nextEpisodeAutoPlaySearching = false,
-                nextEpisodeAutoPlaySourceName = null,
-                nextEpisodeAutoPlayCountdownSec = null
-            )
+        clearNextEpisodeAndCancelPostPlay()
+        return
+    }
+
+    if (normalizedType == "other" || normalizedType == "cloud") {
+        val currentId = currentVideoId
+        val idx = if (currentId != null) metaVideos.indexOfFirst { it.id == currentId } else -1
+        val resolvedNext = if (idx >= 0 && idx < metaVideos.size - 1) metaVideos[idx + 1] else null
+        nextEpisodeVideo = resolvedNext
+        if (resolvedNext == null) {
+            clearNextEpisodeAndCancelPostPlay()
+            return
         }
+        val nextInfo = NextEpisodeInfo(
+            videoId = resolvedNext.id,
+            season = resolvedNext.season ?: 1,
+            episode = resolvedNext.episode ?: (idx + 2),
+            title = resolvedNext.title,
+            thumbnail = resolvedNext.thumbnail,
+            overview = resolvedNext.overview,
+            released = resolvedNext.released,
+            hasAired = true,
+            unairedMessage = null,
+            isOtherType = normalizedType == "other" || normalizedType == "cloud"
+        )
+        applyRecomputedNextEpisode(nextInfo, resetVisibility)
         return
     }
 
@@ -86,16 +252,7 @@ internal fun PlayerRuntimeController.recomputeNextEpisode(resetVisibility: Boole
     val episode = currentEpisode
     if (season == null || episode == null) {
         nextEpisodeVideo = null
-        _uiState.update {
-            it.copy(
-                nextEpisode = null,
-                showNextEpisodeCard = false,
-                nextEpisodeCardDismissed = false,
-                nextEpisodeAutoPlaySearching = false,
-                nextEpisodeAutoPlaySourceName = null,
-                nextEpisodeAutoPlayCountdownSec = null
-            )
-        }
+        clearNextEpisodeAndCancelPostPlay()
         return
     }
 
@@ -107,16 +264,7 @@ internal fun PlayerRuntimeController.recomputeNextEpisode(resetVisibility: Boole
 
     nextEpisodeVideo = resolvedNext
     if (resolvedNext == null) {
-        _uiState.update {
-            it.copy(
-                nextEpisode = null,
-                showNextEpisodeCard = false,
-                nextEpisodeCardDismissed = false,
-                nextEpisodeAutoPlaySearching = false,
-                nextEpisodeAutoPlaySourceName = null,
-                nextEpisodeAutoPlayCountdownSec = null
-            )
-        }
+        clearNextEpisodeAndCancelPostPlay()
         return
     }
 
@@ -136,29 +284,65 @@ internal fun PlayerRuntimeController.recomputeNextEpisode(resetVisibility: Boole
             context.getString(com.nuvio.tv.R.string.next_episode_not_aired_yet)
         }
     )
+    applyRecomputedNextEpisode(nextInfo, resetVisibility)
+}
 
-    _uiState.update { state ->
-        val sameEpisode = state.nextEpisode?.videoId == nextInfo.videoId
-        val shouldResetVisibility = resetVisibility || !sameEpisode
-        state.copy(
-            nextEpisode = nextInfo,
-            showNextEpisodeCard = if (shouldResetVisibility) false else state.showNextEpisodeCard,
-            nextEpisodeCardDismissed = if (shouldResetVisibility) false else state.nextEpisodeCardDismissed
+private fun PlayerRuntimeController.clearNextEpisodeAndCancelPostPlay() {
+    val mode = _uiState.value.postPlayMode
+    if (mode != null) {
+        resetPostPlayOverlayState(clearEpisode = true)
+        return
+    }
+    _uiState.update {
+        it.copy(
+            nextEpisode = null,
+            postPlayDismissedForCurrentEpisode = false,
         )
     }
 }
 
-internal fun PlayerRuntimeController.resetNextEpisodeCardState(clearEpisode: Boolean = false) {
+private fun PlayerRuntimeController.applyRecomputedNextEpisode(
+    nextInfo: NextEpisodeInfo,
+    resetVisibility: Boolean,
+) {
+    val previousState = _uiState.value
+    val previousNextEpisode = previousState.nextEpisode
+    val previousMode = previousState.postPlayMode
+    if (previousMode is PostPlayMode.StillWatching &&
+        previousNextEpisode != null &&
+        previousNextEpisode.videoId != nextInfo.videoId
+    ) {
+        resetPostPlayOverlayState(clearEpisode = true)
+        return
+    }
+    _uiState.update { state ->
+        val sameEpisode = state.nextEpisode?.videoId == nextInfo.videoId
+        val shouldResetVisibility = resetVisibility || !sameEpisode
+        val updatedMode = if (shouldResetVisibility) {
+            null
+        } else {
+            state.postPlayMode?.copyWithNextEpisode(nextInfo)
+        }
+        state.copy(
+            nextEpisode = nextInfo,
+            postPlayMode = updatedMode,
+            postPlayDismissedForCurrentEpisode =
+                if (shouldResetVisibility && !state.postPlayDismissedForCurrentEpisode) false
+                else state.postPlayDismissedForCurrentEpisode,
+        )
+    }
+}
+
+internal fun PlayerRuntimeController.resetPostPlayOverlayState(clearEpisode: Boolean = false) {
     nextEpisodeAutoPlayJob?.cancel()
     nextEpisodeAutoPlayJob = null
+    stillWatchingPromptJob?.cancel()
+    stillWatchingPromptJob = null
     _uiState.update { state ->
         state.copy(
             nextEpisode = if (clearEpisode) null else state.nextEpisode,
-            showNextEpisodeCard = false,
-            nextEpisodeCardDismissed = false,
-            nextEpisodeAutoPlaySearching = false,
-            nextEpisodeAutoPlaySourceName = null,
-            nextEpisodeAutoPlayCountdownSec = null
+            postPlayMode = null,
+            postPlayDismissedForCurrentEpisode = false,
         )
     }
     if (clearEpisode) {
@@ -166,19 +350,38 @@ internal fun PlayerRuntimeController.resetNextEpisodeCardState(clearEpisode: Boo
     }
 }
 
-internal fun PlayerRuntimeController.evaluateNextEpisodeCardVisibility(positionMs: Long, durationMs: Long) {
+internal fun PlayerRuntimeController.evaluatePostPlayOverlayVisibility(positionMs: Long, durationMs: Long) {
+    if (_playbackTimeline.value.isLive) return
     if (!hasRenderedFirstFrame) return
+    // Short debrid/error clips must never arm next-episode auto-play (see #2819).
+    // Prefer the largest known duration; the per-poll value can drop transiently.
+    val effectiveDurationEarly = maxOf(durationMs, lastKnownDuration)
+    if (isShortPlaceholderDuration(effectiveDurationEarly)) return
+    // Act only after this stream has reported a position away from its end.
+    if (!endDetectionArmed) {
+        if (!PlayerNextEpisodeRules.isAwayFromEnd(
+                positionMs = positionMs,
+                durationMs = effectiveDurationEarly,
+                skipIntervals = skipIntervals,
+                thresholdMode = nextEpisodeThresholdModeSetting,
+                thresholdPercent = nextEpisodeThresholdPercentSetting,
+                thresholdMinutesBeforeEnd = nextEpisodeThresholdMinutesBeforeEndSetting
+            )
+        ) return
+        endDetectionArmed = true
+    }
+    if (!_uiState.value.error.isNullOrBlank()) return
 
     val state = _uiState.value
-    if (state.nextEpisode == null || nextEpisodeVideo == null) {
-        if (state.showNextEpisodeCard) {
-            _uiState.update { it.copy(showNextEpisodeCard = false) }
+    if (state.nextEpisode?.hasAired != true || nextEpisodeVideo == null) {
+        if (state.postPlayMode != null) {
+            _uiState.update { it.copy(postPlayMode = null) }
         }
         return
     }
-    if (state.showNextEpisodeCard || state.nextEpisodeCardDismissed) return
+    if (state.postPlayMode != null || state.postPlayDismissedForCurrentEpisode) return
 
-    val effectiveDuration = durationMs.takeIf { it > 0L } ?: lastKnownDuration
+    val effectiveDuration = effectiveDurationEarly
     val shouldShow = PlayerNextEpisodeRules.shouldShowNextEpisodeCard(
         positionMs = positionMs,
         durationMs = effectiveDuration,
@@ -188,12 +391,25 @@ internal fun PlayerRuntimeController.evaluateNextEpisodeCardVisibility(positionM
         thresholdMinutesBeforeEnd = nextEpisodeThresholdMinutesBeforeEndSetting
     )
 
-    if (shouldShow) {
-        _uiState.update { it.copy(showNextEpisodeCard = true) }
-        if (
-            state.nextEpisode.hasAired &&
-            streamAutoPlayNextEpisodeEnabledSetting
-        ) {
+    if (!shouldShow) return
+
+    if (_uiState.value.postPlayDismissedForCurrentEpisode) return
+
+    val shouldEnterStillWatching = shouldEnterStillWatchingPrompt(
+        stillWatchingEnabled = stillWatchingEnabledSetting,
+        autoPlayNextEpisodeEnabled = streamAutoPlayNextEpisodeEnabledSetting,
+        nextEpisodeHasAired = state.nextEpisode.hasAired,
+        consecutiveAutoPlayCount = consecutiveAutoPlayCount,
+        threshold = stillWatchingEpisodeThresholdSetting,
+    )
+
+    if (shouldEnterStillWatching) {
+        enterStillWatchingPromptMode()
+    } else {
+        _uiState.update {
+            it.copy(postPlayMode = PostPlayMode.AutoPlay(nextEpisode = state.nextEpisode))
+        }
+        if (state.nextEpisode.hasAired && streamAutoPlayNextEpisodeEnabledSetting) {
             playNextEpisode()
         }
     }
@@ -219,29 +435,41 @@ internal fun PlayerRuntimeController.showStreamSourceIndicator(stream: Stream) {
 internal fun PlayerRuntimeController.updateActiveSkipInterval(positionMs: Long) {
     if (skipIntervals.isEmpty()) {
         if (_uiState.value.activeSkipInterval != null) {
-            _uiState.update { it.copy(activeSkipInterval = null) }
+            _uiState.update { it.copy(activeSkipInterval = null, skipIntervalDismissed = false) }
         }
         return
     }
 
-    val positionSec = positionMs / 1000.0
-    val active = skipIntervals.find { interval ->
-        positionSec >= interval.startTime && positionSec < (interval.endTime - 0.5)
-    }
+    // Don't evaluate skip intervals until player settings are loaded from DataStore.
+    // Without this, autoSkipSegmentTypes is empty on first iterations, causing the
+    // skip button to appear instead of auto-skipping.
+    if (!playerSettingsInitialized) return
 
+    val active = nextActiveSkipInterval(skipIntervals, positionMs)
     val currentActive = _uiState.value.activeSkipInterval
 
     if (active != null) {
-        
         if (currentActive == null || active.type != currentActive.type || active.startTime != currentActive.startTime) {
             lastActiveSkipType = active.type
             _uiState.update { it.copy(activeSkipInterval = active, skipIntervalDismissed = false) }
         }
+        val segmentType = AutoSkipSegmentType.fromSkipIntervalType(active.type)
+        val activeKey = active.autoSkipKey()
+        if (
+            segmentType != null &&
+            segmentType in autoSkipSegmentTypes &&
+            activeKey !in autoSkippedIntervalKeys
+        ) {
+            autoSkippedIntervalKeys.add(activeKey)
+            skipInterval(active)
+        }
     } else if (currentActive != null) {
-        
         _uiState.update { it.copy(activeSkipInterval = null, skipIntervalDismissed = false) }
     }
 }
+
+private fun SkipInterval.autoSkipKey(): String =
+    "$provider:$type:$startTime:$endTime"
 
 internal fun PlayerRuntimeController.tryShowParentalGuide() {
     val state = _uiState.value
@@ -252,64 +480,56 @@ internal fun PlayerRuntimeController.tryShowParentalGuide() {
 }
 
 internal fun PlayerRuntimeController.fetchParentalGuide(id: String?, type: String?, season: Int?, episode: Int?) {
+    if (!parentalGuideEnabled) return
     if (id.isNullOrBlank()) return
-    
+
     val imdbId = id.split(":").firstOrNull()?.takeIf { it.startsWith("tt") } ?: return
 
     scope.launch {
-        val response = if (type in listOf("series", "tv") && season != null && episode != null) {
-            parentalGuideRepository.getTVGuide(imdbId, season, episode)
-        } else {
-            parentalGuideRepository.getMovieGuide(imdbId)
+        val guide = parentalGuideRepository.getParentalGuide(imdbId) ?: return@launch
+
+        val labels = mapOf(
+            "nudity" to context.getString(R.string.parental_nudity),
+            "violence" to context.getString(R.string.parental_violence),
+            "profanity" to context.getString(R.string.parental_profanity),
+            "alcohol" to context.getString(R.string.parental_alcohol),
+            "frightening" to context.getString(R.string.parental_frightening)
+        )
+        val severityOrder = mapOf(
+            "severe" to 0, "moderate" to 1, "mild" to 2
+        )
+
+        val entries = listOfNotNull(
+            guide.nudity?.let { "nudity" to it },
+            guide.violence?.let { "violence" to it },
+            guide.profanity?.let { "profanity" to it },
+            guide.alcohol?.let { "alcohol" to it },
+            guide.frightening?.let { "frightening" to it }
+        )
+
+        val warnings = entries
+            .sortedBy { severityOrder[it.second.lowercase()] ?: 3 }
+            .map {
+                val localizedSeverity = when (it.second.lowercase()) {
+                    "severe" -> context.getString(R.string.parental_severity_severe)
+                    "moderate" -> context.getString(R.string.parental_severity_moderate)
+                    "mild" -> context.getString(R.string.parental_severity_mild)
+                    else -> it.second
+                }
+                ParentalWarning(label = labels[it.first] ?: it.first, severity = localizedSeverity)
+            }
+            .take(5)
+
+        _uiState.update {
+            it.copy(
+                parentalWarnings = warnings,
+                showParentalGuide = false,
+                parentalGuideHasShown = false
+            )
         }
 
-        if (response?.parentalGuide != null) {
-            val guide = response.parentalGuide
-            val labels = mapOf(
-                "nudity" to context.getString(R.string.parental_nudity),
-                "violence" to context.getString(R.string.parental_violence),
-                "profanity" to context.getString(R.string.parental_profanity),
-                "alcohol" to context.getString(R.string.parental_alcohol),
-                "frightening" to context.getString(R.string.parental_frightening)
-            )
-            val severityOrder = mapOf(
-                "severe" to 0, "moderate" to 1, "mild" to 2
-            )
-
-            val entries = listOfNotNull(
-                guide.nudity?.let { "nudity" to it },
-                guide.violence?.let { "violence" to it },
-                guide.profanity?.let { "profanity" to it },
-                guide.alcohol?.let { "alcohol" to it },
-                guide.frightening?.let { "frightening" to it }
-            )
-
-            val warnings = entries
-                .filter { it.second.lowercase() != "none" }
-                .sortedBy { severityOrder[it.second.lowercase()] ?: 3 }
-                .map {
-                    val localizedSeverity = when (it.second.lowercase()) {
-                        "severe" -> context.getString(R.string.parental_severity_severe)
-                        "moderate" -> context.getString(R.string.parental_severity_moderate)
-                        "mild" -> context.getString(R.string.parental_severity_mild)
-                        else -> it.second
-                    }
-                    ParentalWarning(label = labels[it.first] ?: it.first, severity = localizedSeverity)
-                }
-                .take(5)
-
-            _uiState.update {
-                it.copy(
-                    parentalWarnings = warnings,
-                    showParentalGuide = false,
-                    parentalGuideHasShown = false
-                )
-            }
-
-            
-            if (_uiState.value.isPlaying) {
-                tryShowParentalGuide()
-            }
+        if (_uiState.value.isPlaying) {
+            tryShowParentalGuide()
         }
     }
 }

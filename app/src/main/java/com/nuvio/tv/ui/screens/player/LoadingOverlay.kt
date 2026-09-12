@@ -1,6 +1,11 @@
 package com.nuvio.tv.ui.screens.player
 
+import com.nuvio.tv.ui.theme.NuvioMotion
+
+import com.nuvio.tv.ui.theme.NuvioTheme
+
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.Crossfade
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -13,12 +18,15 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -26,18 +34,23 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
-import coil.compose.AsyncImage
-import coil.request.ImageRequest
+import coil3.compose.AsyncImage
+import coil3.request.ImageRequest
+import coil3.request.crossfade
 import androidx.compose.ui.platform.LocalContext
 import com.nuvio.tv.ui.components.LoadingIndicator
+import androidx.compose.ui.res.stringResource
 import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.Text
+import com.nuvio.tv.R
 
 @Composable
 fun LoadingOverlay(
@@ -46,6 +59,7 @@ fun LoadingOverlay(
     logoUrl: String?,
     title: String? = null,
     message: String? = null,
+    progress: Float? = null,
     modifier: Modifier = Modifier
 ) {
     var logoLoadFailed by remember(logoUrl) { mutableStateOf(false) }
@@ -108,9 +122,10 @@ fun LoadingOverlay(
             if (backdropRequest != null) {
                 AsyncImage(
                     model = backdropRequest,
-                    contentDescription = "Loading backdrop",
+                    contentDescription = stringResource(R.string.cd_loading_backdrop),
                     modifier = Modifier.fillMaxSize(),
-                    contentScale = ContentScale.Crop
+                    contentScale = ContentScale.Crop,
+                    alignment = Alignment.TopEnd
                 )
             }
 
@@ -128,20 +143,63 @@ fun LoadingOverlay(
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
                     if (showLogo) {
-                        AsyncImage(
-                            model = logoRequest,
-                            contentDescription = "Loading logo",
-                            onError = { logoLoadFailed = true },
+                        val isLogoFillActive = progress != null
+                        val targetFill = (progress ?: 0f).coerceIn(0f, 1f)
+                        val animatedFill by animateFloatAsState(
+                            targetValue = targetFill,
+                            // When completing (target ≈ 1.0), animate faster so the
+                            // fill finishes before the overlay's 200ms fade-out;
+                            // otherwise use the smoother 400ms tween for buffering.
+                            animationSpec = tween(
+                                durationMillis = if (targetFill >= 0.999f) 160 else 400,
+                                easing = LinearEasing
+                            ),
+                            label = "loadingLogoFill"
+                        )
+                        Box(
                             modifier = Modifier
                                 .width(320.dp)
                                 .height(180.dp)
-                                .graphicsLayer {
-                                    alpha = logoAlpha
-                                    scaleX = logoScale
-                                    scaleY = logoScale
-                                },
-                            contentScale = ContentScale.Fit
-                        )
+                        ) {
+                            // Base layer: semi-transparent logo (always visible).
+                            // When the fill effect is active we hold a steady low
+                            // alpha; otherwise fall back to the original fade+pulse.
+                            AsyncImage(
+                                model = logoRequest,
+                                contentDescription = stringResource(R.string.cd_loading_logo),
+                                onError = { logoLoadFailed = true },
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .graphicsLayer {
+                                        alpha = if (isLogoFillActive) 0.25f else logoAlpha
+                                        if (!isLogoFillActive) {
+                                            scaleX = logoScale
+                                            scaleY = logoScale
+                                        }
+                                    },
+                                contentScale = ContentScale.Fit
+                            )
+                            // Foreground layer: full-alpha logo clipped from left
+                            // to right by progress, giving the illusion that the
+                            // base logo is filling up as buffering proceeds.
+                            if (isLogoFillActive) {
+                                AsyncImage(
+                                    model = logoRequest,
+                                    contentDescription = null,
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .drawWithContent {
+                                            val clipWidth = size.width * animatedFill
+                                            if (clipWidth > 0f) {
+                                                clipRect(right = clipWidth) {
+                                                    this@drawWithContent.drawContent()
+                                                }
+                                            }
+                                        },
+                                    contentScale = ContentScale.Fit
+                                )
+                            }
+                        }
                     } else if (!title.isNullOrBlank()) {
                         Text(
                             text = title,
@@ -150,7 +208,7 @@ fun LoadingOverlay(
                             textAlign = TextAlign.Center,
                             maxLines = 2,
                             modifier = Modifier
-                                .padding(horizontal = 24.dp)
+                                .padding(horizontal = NuvioTheme.spacing.xl)
                                 .graphicsLayer {
                                     alpha = logoAlpha
                                     scaleX = logoScale
@@ -165,20 +223,73 @@ fun LoadingOverlay(
                             LoadingIndicator()
                         }
                     }
+
                 }
 
-                if (!message.isNullOrBlank()) {
+                // The horizontal progress bar is suppressed when the show logo
+                // is acting as the fill indicator. The text message stays visible.
+                val showHorizontalBar = progress != null && !showLogo
+                if (!message.isNullOrBlank() || showHorizontalBar) {
                     val messageOffset = if (showLogo || !title.isNullOrBlank()) 94.dp else 86.dp
-                    Text(
-                        text = message,
-                        style = MaterialTheme.typography.labelMedium,
-                        color = Color.White.copy(alpha = 0.72f),
-                        textAlign = TextAlign.Center,
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
                         modifier = Modifier
                             .align(Alignment.Center)
                             .offset(y = messageOffset)
-                            .padding(horizontal = 24.dp)
-                    )
+                            .padding(horizontal = NuvioTheme.spacing.xl)
+                    ) {
+                        Crossfade(
+                            targetState = message?.takeIf { it.isNotBlank() },
+                            animationSpec = tween(durationMillis = 260),
+                            label = "loadingMessageCrossfade",
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(40.dp)
+                        ) { loadingMessage ->
+                            Box(
+                                modifier = Modifier.fillMaxSize(),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                if (loadingMessage != null) {
+                                    Text(
+                                        text = loadingMessage,
+                                        style = MaterialTheme.typography.labelMedium,
+                                        color = Color.White.copy(alpha = 0.72f),
+                                        textAlign = TextAlign.Center,
+                                        maxLines = 2,
+                                        modifier = Modifier.fillMaxWidth()
+                                    )
+                                }
+                            }
+                        }
+                        if (showHorizontalBar) {
+                            Spacer(modifier = Modifier.height(10.dp))
+                            val animatedProgress by animateFloatAsState(
+                                targetValue = progress.coerceIn(0f, 1f),
+                                animationSpec = tween(durationMillis = NuvioMotion.tokens.durations.overlay),
+                                label = "loadingProgress"
+                            )
+                            Box(
+                                modifier = Modifier
+                                    .width(240.dp)
+                                    .height(NuvioTheme.spacing.xs)
+                                    .background(
+                                        color = Color.White.copy(alpha = 0.2f),
+                                        shape = RoundedCornerShape(NuvioTheme.radii.xxs)
+                                    )
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth(animatedProgress)
+                                        .height(NuvioTheme.spacing.xs)
+                                        .background(
+                                            color = Color.White.copy(alpha = 0.85f),
+                                            shape = RoundedCornerShape(NuvioTheme.radii.xxs)
+                                        )
+                                )
+                            }
+                        }
+                    }
                 }
             }
         }

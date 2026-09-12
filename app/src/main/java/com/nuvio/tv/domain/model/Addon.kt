@@ -21,8 +21,15 @@ data class Addon(
     val stremioAddonsConfig: StremioAddonsConfig? = null,
     val manifestLanguage: String? = null,
     val configVersion: Long? = null,
-    val timestamp: Long? = null
-)
+    val timestamp: Long? = null,
+    val enabled: Boolean = true
+) {
+    val isActive: Boolean
+        get() = enabled
+}
+
+fun List<Addon>.enabledAddons(): List<Addon> =
+    filter { it.enabled }
 
 @Immutable
 data class CatalogDescriptor(
@@ -33,6 +40,7 @@ data class CatalogDescriptor(
     val extra: List<CatalogExtra> = emptyList(),
     val pageSize: Int? = null,
     val showInHome: Boolean = false,
+    val hasExplicitShowInHome: Boolean = false,
     val extraSupported: List<String> = emptyList(),
     val extraRequired: List<String> = emptyList()
 ) {

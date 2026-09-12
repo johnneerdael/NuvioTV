@@ -1,5 +1,6 @@
 package com.nuvio.tv.data.repository
 
+import android.util.Log
 import com.nuvio.tv.BuildConfig
 import com.nuvio.tv.data.remote.api.TraktApi
 import com.nuvio.tv.data.remote.dto.trakt.TraktEpisodeDto
@@ -8,6 +9,8 @@ import com.nuvio.tv.data.remote.dto.trakt.TraktMovieDto
 import com.nuvio.tv.data.remote.dto.trakt.TraktScrobbleRequestDto
 import com.nuvio.tv.data.remote.dto.trakt.TraktShowDto
 import com.nuvio.tv.core.profile.ProfileManager
+import kotlinx.coroutines.delay
+import java.io.IOException
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlin.math.abs
@@ -44,7 +47,12 @@ class TraktScrobbleService @Inject constructor(
     private val traktProgressService: TraktProgressService,
     private val profileManager: ProfileManager
 ) {
+    companion object {
+        private const val TAG = "TraktScrobbleSvc"
+    }
+
     private data class ScrobbleStamp(
+        val profileId: Int,
         val action: String,
         val itemKey: String,
         val progress: Float,
@@ -54,6 +62,9 @@ class TraktScrobbleService @Inject constructor(
     private var lastScrobbleStamp: ScrobbleStamp? = null
     private val minSendIntervalMs = 8_000L
     private val progressWindow = 1.5f
+    private val maxRetries = 2
+    private val retryDelayMs = 1_500L
+    private val serverOverloadedRetryDelayMs = 5_000L
 
     suspend fun scrobbleStart(item: TraktScrobbleItem, progressPercent: Float) {
         sendScrobble(action = "start", item = item, progressPercent = progressPercent)
@@ -72,32 +83,75 @@ class TraktScrobbleService @Inject constructor(
         item: TraktScrobbleItem,
         progressPercent: Float
     ) {
-        if (profileManager.activeProfileId.value != 1) return
+        val activeProfileId = profileManager.activeProfileId.value
         if (!traktAuthService.getCurrentAuthState().isAuthenticated) return
         if (!traktAuthService.hasRequiredCredentials()) return
 
         val clampedProgress = progressPercent.coerceIn(0f, 100f)
-        if (shouldSkip(action, item.itemKey, clampedProgress)) return
+        if (shouldSkip(activeProfileId, action, item.itemKey, clampedProgress)) return
 
         val requestBody = buildRequestBody(item, clampedProgress)
 
-        val response = traktAuthService.executeAuthorizedWriteRequest { authHeader ->
-            when (action) {
-                "start" -> traktApi.scrobbleStart(authHeader, requestBody)
-                else -> traktApi.scrobbleStop(authHeader, requestBody)
-            }
-        } ?: return
+        var lastException: Exception? = null
+        val attempts = if (action == "stop") maxRetries + 1 else 1
 
-        if (response.isSuccessful || response.code() == 409) {
-            lastScrobbleStamp = ScrobbleStamp(
-                action = action,
-                itemKey = item.itemKey,
-                progress = clampedProgress,
-                timestampMs = System.currentTimeMillis()
-            )
-            if (action == "stop") {
-                traktProgressService.refreshNow()
+        for (attempt in 1..attempts) {
+            val response = try {
+                traktAuthService.executeAuthorizedWriteRequest { authHeader ->
+                    when (action) {
+                        "start" -> traktApi.scrobbleStart(authHeader, requestBody)
+                        else -> traktApi.scrobbleStop(authHeader, requestBody)
+                    }
+                }
+            } catch (e: IOException) {
+                lastException = e
+                if (attempt < attempts) {
+                    Log.w(TAG, "Scrobble $action attempt $attempt failed (IO), retrying", e)
+                    delay(retryDelayMs * attempt)
+                    continue
+                }
+                null
             }
+
+            if (response == null) {
+                if (attempt < attempts) {
+                    Log.w(TAG, "Scrobble $action attempt $attempt returned null, retrying")
+                    delay(retryDelayMs * attempt)
+                    continue
+                }
+                Log.w(TAG, "Scrobble $action failed after $attempts attempts", lastException)
+                return
+            }
+
+            if (response.isSuccessful || response.code() == 409) {
+                lastScrobbleStamp = ScrobbleStamp(
+                    profileId = activeProfileId,
+                    action = action,
+                    itemKey = item.itemKey,
+                    progress = clampedProgress,
+                    timestampMs = System.currentTimeMillis()
+                )
+                if (action == "stop") {
+                    traktProgressService.refreshNow()
+                }
+                return
+            }
+
+            // Server error (5xx) — retry for stop actions
+            if (response.code() in 500..599 && attempt < attempts) {
+                val delayMs = if (response.code() in 502..504) {
+                    serverOverloadedRetryDelayMs
+                } else {
+                    retryDelayMs * attempt
+                }
+                Log.w(TAG, "Scrobble $action attempt $attempt got ${response.code()}, retrying in ${delayMs}ms")
+                delay(delayMs)
+                continue
+            }
+
+            // Non-retryable error (4xx other than 409)
+            Log.w(TAG, "Scrobble $action failed with code ${response.code()}")
+            return
         }
     }
 
@@ -133,13 +187,21 @@ class TraktScrobbleService @Inject constructor(
         }
     }
 
-    private fun shouldSkip(action: String, itemKey: String, progress: Float): Boolean {
+    private fun shouldSkip(profileId: Int, action: String, itemKey: String, progress: Float): Boolean {
         val last = lastScrobbleStamp ?: return false
         val now = System.currentTimeMillis()
         val isSameWindow = now - last.timestampMs < minSendIntervalMs
+        val isSameProfile = last.profileId == profileId
         val isSameAction = last.action == action
         val isSameItem = last.itemKey == itemKey
         val isNearProgress = abs(last.progress - progress) <= progressWindow
-        return isSameWindow && isSameAction && isSameItem && isNearProgress
+
+        // Never skip a stop/pause if the last successful action was start —
+        // Trakt needs to know playback ended regardless of timing.
+        if ((action == "stop" || action == "pause") && last.action == "start" && isSameItem && isSameProfile) {
+            return false
+        }
+
+        return isSameWindow && isSameProfile && isSameAction && isSameItem && isNearProgress
     }
 }

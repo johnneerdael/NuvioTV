@@ -1,10 +1,13 @@
 package com.nuvio.tv.ui.components
 
+import com.nuvio.tv.ui.theme.NuvioTheme
+
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -13,6 +16,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -53,11 +57,11 @@ import androidx.compose.ui.unit.sp
 import kotlin.math.floor
 import kotlin.math.max
 import androidx.tv.material3.Text
-import coil.compose.AsyncImage
-import coil.request.ImageRequest
+import coil3.compose.AsyncImage
+import coil3.request.ImageRequest
+import coil3.request.crossfade
 import com.nuvio.tv.R
 import com.nuvio.tv.data.remote.supabase.AvatarCatalogItem
-import com.nuvio.tv.ui.theme.NuvioColors
 
 private val PinnedAvatarCategories = listOf("anime", "animation", "tv", "movie", "gaming")
 
@@ -72,8 +76,10 @@ fun AvatarPickerGrid(
     val categories = remember(avatars) {
         buildList {
             add("all")
+            if (avatars.any { it.memberOnly }) add("supporter")
 
             val normalizedCategories = avatars
+                .filterNot { it.memberOnly }
                 .mapNotNull { avatar -> avatar.category.trim().takeIf { it.isNotEmpty() } }
                 .distinct()
 
@@ -103,8 +109,13 @@ fun AvatarPickerGrid(
     }
 
     val filteredAvatars = remember(avatars, selectedCategory) {
-        if (selectedCategory == "all") avatars
-        else avatars.filter { it.category.equals(selectedCategory, ignoreCase = true) }
+        when (selectedCategory) {
+            "all" -> avatars
+            "supporter" -> avatars.filter { it.memberOnly }
+            else -> avatars.filter {
+                !it.memberOnly && it.category.equals(selectedCategory, ignoreCase = true)
+            }
+        }
     }
     val avatarRequesters = remember(filteredAvatars) {
         filteredAvatars.associate { it.id to FocusRequester() }
@@ -114,11 +125,12 @@ fun AvatarPickerGrid(
 
     Column(modifier = modifier) {
         // Category tabs
-        Row(
+        FlowRow(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(bottom = 16.dp),
-            horizontalArrangement = Arrangement.Center
+                .padding(bottom = NuvioTheme.spacing.lg),
+            horizontalArrangement = Arrangement.Center,
+            verticalArrangement = Arrangement.spacedBy(NuvioTheme.spacing.sm)
         ) {
             categories.forEach { category ->
                 CategoryTab(
@@ -129,7 +141,7 @@ fun AvatarPickerGrid(
                     onClick = { selectedCategory = category }
                 )
                 if (category != categories.last()) {
-                    Spacer(modifier = Modifier.width(8.dp))
+                    Spacer(modifier = Modifier.width(NuvioTheme.spacing.sm))
                 }
             }
         }
@@ -140,8 +152,8 @@ fun AvatarPickerGrid(
                 .wrapContentHeight()
         ) {
             val minCellWidth = 88.dp
-            val horizontalSpacing = 12.dp
-            val horizontalPadding = 16.dp
+            val horizontalSpacing = NuvioTheme.spacing.md
+            val horizontalPadding = NuvioTheme.spacing.lg
             val availableWidth = maxWidth - horizontalPadding
             val columnCount = max(
                 1,
@@ -153,9 +165,9 @@ fun AvatarPickerGrid(
 
             LazyVerticalGrid(
                 columns = GridCells.Adaptive(minSize = minCellWidth),
-                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                contentPadding = PaddingValues(horizontal = NuvioTheme.spacing.sm, vertical = NuvioTheme.spacing.xs),
                 horizontalArrangement = Arrangement.spacedBy(horizontalSpacing),
-                verticalArrangement = Arrangement.spacedBy(12.dp),
+                verticalArrangement = Arrangement.spacedBy(NuvioTheme.spacing.md),
                 modifier = Modifier.fillMaxWidth()
             ) {
                 itemsIndexed(filteredAvatars, key = { _, avatar -> avatar.id }) { index, avatar ->
@@ -186,9 +198,9 @@ private fun CategoryTab(
 
     val bgColor by animateColorAsState(
         targetValue = when {
-            isSelected && isFocused -> NuvioColors.FocusBackground
-            isSelected -> NuvioColors.Secondary.copy(alpha = 0.22f)
-            isFocused -> NuvioColors.FocusBackground
+            isSelected && isFocused -> NuvioTheme.colors.FocusBackground
+            isSelected -> NuvioTheme.colors.Secondary.copy(alpha = 0.22f)
+            isFocused -> NuvioTheme.colors.FocusBackground
             else -> Color.White.copy(alpha = 0.06f)
         },
         animationSpec = tween(150),
@@ -196,26 +208,26 @@ private fun CategoryTab(
     )
     val borderColor by animateColorAsState(
         targetValue = when {
-            isSelected && isFocused -> NuvioColors.FocusRing
-            isFocused -> NuvioColors.FocusRing
-            isSelected -> NuvioColors.Secondary
-            else -> NuvioColors.Border
+            isSelected && isFocused -> NuvioTheme.colors.FocusRing
+            isFocused -> NuvioTheme.colors.FocusRing
+            isSelected -> NuvioTheme.colors.Secondary
+            else -> NuvioTheme.colors.Border
         },
         animationSpec = tween(150),
         label = "categoryBorder"
     )
     val borderWidth by animateDpAsState(
         targetValue = when {
-            isSelected && isFocused -> 2.dp
-            isFocused -> 2.dp
-            isSelected -> 1.dp
-            else -> 1.dp
+            isSelected && isFocused -> NuvioTheme.spacing.xxs
+            isFocused -> NuvioTheme.spacing.xxs
+            isSelected -> NuvioTheme.spacing.hairline
+            else -> NuvioTheme.spacing.hairline
         },
         animationSpec = tween(150),
         label = "categoryBorderWidth"
     )
     val textColor by animateColorAsState(
-        targetValue = if (isSelected || isFocused) Color.White else NuvioColors.TextSecondary,
+        targetValue = if (isSelected || isFocused) Color.White else NuvioTheme.colors.TextSecondary,
         animationSpec = tween(150),
         label = "categoryText"
     )
@@ -232,14 +244,21 @@ private fun CategoryTab(
             )
             .clip(RoundedCornerShape(20.dp))
             .background(bgColor)
-            .border(borderWidth, borderColor, RoundedCornerShape(20.dp))
+            .border(
+                border = if (isFocused) {
+                    NuvioTheme.focusRing.border(borderWidth)
+                } else {
+                    BorderStroke(borderWidth, borderColor)
+                },
+                shape = RoundedCornerShape(20.dp)
+            )
             .onFocusChanged { isFocused = it.isFocused }
             .clickable(
                 interactionSource = interactionSource,
                 indication = null,
                 onClick = onClick
             )
-            .padding(horizontal = 18.dp, vertical = 8.dp),
+            .padding(horizontal = 18.dp, vertical = NuvioTheme.spacing.sm),
         contentAlignment = Alignment.Center
     ) {
         Text(
@@ -271,21 +290,12 @@ private fun AvatarGridItem(
     val borderWidth by animateDpAsState(
         targetValue = when {
             isSelected -> 3.dp
-            isFocused -> 2.dp
-            else -> 0.dp
+            isFocused -> NuvioTheme.spacing.xxs
+            else -> NuvioTheme.spacing.none
         },
         animationSpec = tween(120),
         label = "avatarBorder"
     )
-    val borderColor by animateColorAsState(
-        targetValue = when {
-            isSelected || isFocused -> NuvioColors.FocusRing
-            else -> Color.Transparent
-        },
-        animationSpec = tween(120),
-        label = "avatarBorderColor"
-    )
-
     Box(
         modifier = Modifier
             .requiredSize(80.dp)
@@ -306,7 +316,14 @@ private fun AvatarGridItem(
                 onFocused(it.isFocused)
             }
             .clip(CircleShape)
-            .border(borderWidth, borderColor, CircleShape)
+            .border(
+                border = if (isSelected || isFocused) {
+                    NuvioTheme.focusRing.border(borderWidth)
+                } else {
+                    BorderStroke(borderWidth, Color.Transparent)
+                },
+                shape = CircleShape
+            )
             .clickable(
                 interactionSource = interactionSource,
                 indication = null,
@@ -334,8 +351,9 @@ private fun AvatarGridItem(
 
 @Composable
 private fun categoryLabel(category: String): String {
-    return when (category) {
+    return when (category.lowercase()) {
         "all" -> stringResource(R.string.profile_avatar_category_all)
+        "supporter" -> stringResource(R.string.profile_avatar_category_supporter)
         "anime" -> stringResource(R.string.profile_avatar_category_anime)
         "animation" -> stringResource(R.string.profile_avatar_category_animation)
         "movie" -> stringResource(R.string.profile_avatar_category_movie)

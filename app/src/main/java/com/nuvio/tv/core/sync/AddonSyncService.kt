@@ -23,7 +23,8 @@ class AddonSyncService @Inject constructor(
     private val postgrest: Postgrest,
     private val authManager: AuthManager,
     private val addonPreferences: AddonPreferences,
-    private val profileManager: ProfileManager
+    private val profileManager: ProfileManager,
+    private val syncClientIdentity: SyncClientIdentity
 ) {
     private suspend fun <T> withJwtRefreshRetry(block: suspend () -> T): T {
         return try {
@@ -50,18 +51,27 @@ class AddonSyncService @Inject constructor(
             }
 
             val localUrls = addonPreferences.installedAddonUrls.first()
+            val userSetNames = addonPreferences.userSetNames.first()
+            val enabledStates = addonPreferences.addonEnabledStates.first()
             Log.d(TAG, "pushToRemote: localUrls count=${localUrls.size} for profile $profileId")
 
             val params = buildJsonObject {
                 put("p_addons", buildJsonArray {
                     localUrls.forEachIndexed { index, url ->
+                        val canonicalUrl = canonicalizeUrl(url)
                         addJsonObject {
                             put("url", url)
                             put("sort_order", index)
+                            put("enabled", enabledStates[canonicalUrl] ?: true)
+                            val name = userSetNames[canonicalUrl] ?: userSetNames[url]
+                            if (!name.isNullOrBlank()) {
+                                put("name", name)
+                            }
                         }
                     }
                 })
                 put("p_profile_id", profileId)
+                putSyncOriginClientId(syncClientIdentity)
             }
             Log.d(TAG, "pushToRemote: calling RPC sync_push_addons with profile_id=$profileId")
             withJwtRefreshRetry {
@@ -96,6 +106,20 @@ class AddonSyncService @Inject constructor(
                     .decodeList<SupabaseAddon>()
             }
 
+            val nameMap = mutableMapOf<String, String>()
+            val enabledMap = mutableMapOf<String, Boolean>()
+            remoteAddons.forEach { addon ->
+                val canonicalUrl = canonicalizeUrl(addon.url)
+                if (!addon.name.isNullOrBlank()) {
+                    nameMap[canonicalUrl] = addon.name
+                }
+                enabledMap[canonicalUrl] = addon.enabled
+            }
+            if (remoteAddons.isNotEmpty()) {
+                addonPreferences.setUserSetNames(nameMap)
+                addonPreferences.setAddonEnabledStates(enabledMap)
+            }
+
             Result.success(
                 remoteAddons
                 .sortedBy { it.sortOrder }
@@ -105,5 +129,18 @@ class AddonSyncService @Inject constructor(
             Log.e(TAG, "Failed to get remote addon URLs", e)
             Result.failure(e)
         }
+    }
+
+    private fun canonicalizeUrl(url: String): String {
+        val trimmed = url.trim().trimEnd('/')
+        val queryStart = trimmed.indexOf('?')
+        val path = if (queryStart >= 0) trimmed.substring(0, queryStart) else trimmed
+        val query = if (queryStart >= 0) trimmed.substring(queryStart) else ""
+        val cleanPath = if (path.endsWith("/manifest.json", ignoreCase = true)) {
+            path.dropLast("/manifest.json".length).trimEnd('/')
+        } else {
+            path.trimEnd('/')
+        }
+        return cleanPath + query
     }
 }

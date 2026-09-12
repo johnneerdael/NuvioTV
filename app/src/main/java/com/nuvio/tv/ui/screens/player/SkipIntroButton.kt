@@ -2,6 +2,8 @@
 
 package com.nuvio.tv.ui.screens.player
 
+import com.nuvio.tv.ui.theme.NuvioTheme
+
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.LinearEasing
@@ -47,30 +49,35 @@ import androidx.tv.material3.Text
 import androidx.compose.ui.res.stringResource
 import com.nuvio.tv.R
 import com.nuvio.tv.data.repository.SkipInterval
-import com.nuvio.tv.ui.theme.NuvioColors
-import kotlinx.coroutines.delay
 
 /**
  * Skip Intro/Outro/Recap button for the player.
  * Appears at bottom-left when playback is within a skip interval.
- * Auto-hides after 15 seconds. Focusable for D-pad navigation.
+ * Auto-hides after 10 seconds. Focusable for D-pad navigation.
  */
 @Composable
 fun SkipIntroButton(
     interval: SkipInterval?,
     dismissed: Boolean,
     controlsVisible: Boolean,
+    suppressFocus: Boolean = false,
+    canFocus: Boolean = true,
     onSkip: () -> Unit,
     onDismiss: () -> Unit,
+    onHideControls: (() -> Unit)? = null,
     onVisibilityChanged: (Boolean) -> Unit = {},
     onFocused: (() -> Unit)? = null,
     focusRequester: FocusRequester? = null,
     downFocusRequester: FocusRequester? = null,
+    upFocusRequester: FocusRequester? = null,
+    rightFocusRequester: FocusRequester? = null,
     modifier: Modifier = Modifier
 ) {
+
     var lastType by remember { mutableStateOf(interval?.type) }
     if (interval != null) lastType = interval.type
-    val shouldShow = interval != null && (!dismissed || controlsVisible)
+    val hasActiveInterval = interval != null
+    val shouldShow = hasActiveInterval && (!dismissed || controlsVisible)
 
     var autoHidden by remember { mutableStateOf(false) }
     var manuallyDismissed by remember { mutableStateOf(false) }
@@ -101,7 +108,7 @@ fun SkipIntroButton(
     LaunchedEffect(shouldShow, autoHidden, controlsVisible) {
         if (shouldShow && !autoHidden && !controlsVisible) {
             progress.animateTo(1f, animationSpec = tween(
-                durationMillis = ((1f - progress.value) * 10000).toInt().coerceAtLeast(1),
+                durationMillis = skipIntroAutoHideRemainingMs(progress.value),
                 easing = LinearEasing
             ))
             autoHidden = true
@@ -116,13 +123,20 @@ fun SkipIntroButton(
         }
     }
 
-    val isVisible = shouldShow && (!autoHidden || controlsVisible)
+    val isVisible = isSkipIntroButtonVisible(
+        hasActiveInterval = hasActiveInterval,
+        dismissed = dismissed,
+        controlsVisible = controlsVisible,
+        autoHidden = autoHidden,
+    )
 
     LaunchedEffect(isVisible) { onVisibilityChanged(isVisible) }
 
     // Request focus when becoming visible or when controls hide
-    LaunchedEffect(isVisible, controlsVisible) {
-        if (isVisible && !controlsVisible) {
+    // but not when the next episode card has priority, and not when focus is
+    // reserved for an overlay (e.g. subtitle selection — #2874).
+    LaunchedEffect(isVisible, controlsVisible, suppressFocus, canFocus) {
+        if (isVisible && !controlsVisible && !suppressFocus && canFocus) {
             try { activeFocusRequester.requestFocus() } catch (_: Exception) {}
         }
     }
@@ -137,21 +151,38 @@ fun SkipIntroButton(
             onClick = onSkip,
             modifier = Modifier
                 .focusRequester(activeFocusRequester)
-                .then(
-                    if (downFocusRequester != null) {
-                        Modifier.focusProperties { down = downFocusRequester }
-                    } else {
-                        Modifier
-                    }
-                )
+                .focusProperties {
+                    this.canFocus = canFocus
+                    downFocusRequester?.let { down = it }
+                    upFocusRequester?.let { up = it }
+                    rightFocusRequester?.let { right = it }
+                }
                 .onPreviewKeyEvent { keyEvent ->
-                    if (
-                        downFocusRequester != null &&
-                        keyEvent.nativeKeyEvent.action == android.view.KeyEvent.ACTION_DOWN &&
-                        keyEvent.nativeKeyEvent.keyCode == android.view.KeyEvent.KEYCODE_DPAD_DOWN
-                    ) {
-                        try { downFocusRequester.requestFocus() } catch (_: Exception) {}
-                        true
+                    if (!canFocus) return@onPreviewKeyEvent false
+                    if (keyEvent.nativeKeyEvent.action == android.view.KeyEvent.ACTION_DOWN) {
+                        when (keyEvent.nativeKeyEvent.keyCode) {
+                            android.view.KeyEvent.KEYCODE_DPAD_DOWN -> {
+                                if (downFocusRequester != null) {
+                                    try { downFocusRequester.requestFocus() } catch (_: Exception) {}
+                                    true
+                                } else {
+                                    false
+                                }
+                            }
+                            android.view.KeyEvent.KEYCODE_DPAD_UP -> {
+                                // Pressing UP from Skip Intro button navigates to upFocusRequester or hides controls
+                                if (upFocusRequester != null) {
+                                    try { upFocusRequester.requestFocus() } catch (_: Exception) {}
+                                    true
+                                } else if (onHideControls != null) {
+                                    onHideControls()
+                                    true
+                                } else {
+                                    false
+                                }
+                            }
+                            else -> false
+                        }
                     } else {
                         false
                     }
@@ -162,41 +193,41 @@ fun SkipIntroButton(
                 },
             colors = CardDefaults.colors(
                 containerColor = Color(0xFF1E1E1E).copy(alpha = 0.85f),
-                focusedContainerColor = NuvioColors.Secondary
+                focusedContainerColor = NuvioTheme.colors.Secondary
             ),
-            shape = CardDefaults.shape(shape = RoundedCornerShape(12.dp))
+            shape = CardDefaults.shape(shape = RoundedCornerShape(NuvioTheme.radii.md))
         ) {
             androidx.compose.foundation.layout.Column(
                 modifier = Modifier.width(IntrinsicSize.Max)
             ) {
                 Row(
-                    modifier = Modifier.padding(horizontal = 18.dp, vertical = 12.dp),
+                    modifier = Modifier.padding(horizontal = 18.dp, vertical = NuvioTheme.spacing.md),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Icon(
                         imageVector = Icons.Default.SkipNext,
                         contentDescription = null,
-                        tint = if (isFocused) NuvioColors.OnSecondary else Color.White,
+                        tint = if (isFocused) NuvioTheme.colors.OnSecondary else Color.White,
                         modifier = Modifier.size(20.dp)
                     )
                     Text(
                         text = getSkipLabel(lastType),
-                        color = if (isFocused) NuvioColors.OnSecondary else Color.White,
+                        color = if (isFocused) NuvioTheme.colors.OnSecondary else Color.White,
                         fontSize = 14.sp,
-                        modifier = Modifier.padding(start = 8.dp)
+                        modifier = Modifier.padding(start = NuvioTheme.spacing.sm)
                     )
                 }
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(4.dp)
-                        .clip(RoundedCornerShape(bottomStart = 12.dp, bottomEnd = 12.dp))
+                        .height(NuvioTheme.spacing.xs)
+                        .clip(RoundedCornerShape(bottomStart = NuvioTheme.spacing.md, bottomEnd = NuvioTheme.spacing.md))
                         .background(Color.White.copy(alpha = if (controlsVisible || autoHidden || dismissed) 0f else 0.15f))
                 ) {
                     Box(
                         modifier = Modifier
                             .fillMaxWidth(progress.value)
-                            .height(4.dp)
+                            .height(NuvioTheme.spacing.xs)
                             .background(Color(0xFF1E1E1E).copy(alpha = if (controlsVisible || autoHidden || dismissed) 0f else 0.85f))
                     )
                 }
@@ -206,9 +237,9 @@ fun SkipIntroButton(
 }
 
 @Composable
-private fun getSkipLabel(type: String?): String = when (type) {
-    "op", "mixed-op", "intro" -> stringResource(R.string.skip_intro)
-    "ed", "mixed-ed", "outro" -> stringResource(R.string.skip_ending)
+private fun getSkipLabel(type: String?): String = when (type?.trim()?.lowercase()) {
+    "op", "opening", "mixed-op", "intro" -> stringResource(R.string.skip_intro)
+    "ed", "ending", "mixed-ed", "outro", "credits" -> stringResource(R.string.skip_ending)
     "recap" -> stringResource(R.string.skip_recap)
     else -> stringResource(R.string.skip_generic)
 }

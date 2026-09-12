@@ -1,58 +1,85 @@
 package com.nuvio.tv.data.repository
 
 import android.util.Log
-import com.nuvio.tv.BuildConfig
+import com.nuvio.tv.data.remote.api.ImdbApiParentsGuideCategory
 import com.nuvio.tv.data.remote.api.ParentalGuideApi
-import com.nuvio.tv.data.remote.api.ParentalGuideResponse
 import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Inject
 import javax.inject.Singleton
+
+/**
+ * Resolved parental guide data with a single severity per category,
+ * determined by the highest-voted severity level from the API.
+ */
+data class ParentalGuideResult(
+    val nudity: String? = null,
+    val violence: String? = null,
+    val profanity: String? = null,
+    val alcohol: String? = null,
+    val frightening: String? = null
+)
 
 @Singleton
 class ParentalGuideRepository @Inject constructor(
     private val api: ParentalGuideApi
 ) {
-    private val cache = ConcurrentHashMap<String, ParentalGuideResponse>()
-    private val isConfigured = BuildConfig.PARENTAL_GUIDE_API_URL.isNotEmpty()
+    private val cache = ConcurrentHashMap<String, ParentalGuideResult>()
 
-    suspend fun getMovieGuide(imdbId: String): ParentalGuideResponse? {
-        if (!isConfigured) return null
+    suspend fun getParentalGuide(imdbId: String): ParentalGuideResult? {
         if (!imdbId.startsWith("tt")) return null
 
-        val cacheKey = "movie:$imdbId"
-        cache[cacheKey]?.let { return it }
+        cache[imdbId]?.let { return it }
 
         return try {
-            val response = api.getMovieGuide(imdbId)
-            if (response.isSuccessful && response.body()?.hasData == true) {
-                response.body()!!.also { cache[cacheKey] = it }
+            val response = api.getParentsGuide(imdbId)
+            if (response.isSuccessful && !response.body()?.parentsGuide.isNullOrEmpty()) {
+                val categories = response.body()!!.parentsGuide!!
+                val result = mapToResult(categories)
+                cache[imdbId] = result
+                result
             } else {
                 null
             }
         } catch (e: Exception) {
-            Log.e("ParentalGuide", "Failed to fetch movie guide", e)
+            Log.e("ParentalGuide", "Failed to fetch parental guide for $imdbId", e)
             null
         }
     }
 
-    suspend fun getTVGuide(imdbId: String, season: Int, episode: Int): ParentalGuideResponse? {
-        if (!isConfigured) return null
-        if (!imdbId.startsWith("tt")) return null
-        if (season < 0 || episode < 0) return null
+    private fun mapToResult(categories: List<ImdbApiParentsGuideCategory>): ParentalGuideResult {
+        val categoryMap = categories.associateBy { it.category.uppercase() }
 
-        val cacheKey = "tv:$imdbId:$season:$episode"
-        cache[cacheKey]?.let { return it }
+        return ParentalGuideResult(
+            nudity = resolveSeverity(categoryMap["SEXUAL_CONTENT"]),
+            violence = resolveSeverity(categoryMap["VIOLENCE"]),
+            profanity = resolveSeverity(categoryMap["PROFANITY"]),
+            alcohol = resolveSeverity(categoryMap["ALCOHOL_DRUGS"]),
+            frightening = resolveSeverity(categoryMap["FRIGHTENING_INTENSE_SCENES"])
+        )
+    }
 
-        return try {
-            val response = api.getTVGuide(imdbId, season, episode)
-            if (response.isSuccessful && response.body()?.hasData == true) {
-                response.body()!!.also { cache[cacheKey] = it }
-            } else {
-                null
-            }
-        } catch (e: Exception) {
-            Log.e("ParentalGuide", "Failed to fetch TV guide", e)
-            null
-        }
+    /**
+     * Determines the dominant severity level for a category by picking
+     * the level with the highest vote count (excluding "none").
+     * Returns null if no meaningful votes exist.
+     */
+    private fun resolveSeverity(category: ImdbApiParentsGuideCategory?): String? {
+        if (category == null) return null
+
+        val breakdowns = category.severityBreakdowns ?: return null
+
+        // Find the severity with the most votes, excluding "none"
+        val dominant = breakdowns
+            .filter { it.severityLevel.lowercase() != "none" }
+            .maxByOrNull { it.voteCount }
+
+        // If "none" has more votes than any other severity, treat as no concern
+        val noneVotes = breakdowns
+            .firstOrNull { it.severityLevel.lowercase() == "none" }
+            ?.voteCount ?: 0
+
+        if (dominant == null || dominant.voteCount <= noneVotes) return null
+
+        return dominant.severityLevel.lowercase()
     }
 }

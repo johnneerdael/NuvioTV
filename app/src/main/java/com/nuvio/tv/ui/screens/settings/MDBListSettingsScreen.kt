@@ -2,6 +2,8 @@
 
 package com.nuvio.tv.ui.screens.settings
 
+import com.nuvio.tv.ui.theme.NuvioTheme
+
 import android.view.KeyEvent
 import android.widget.Toast
 import androidx.compose.foundation.layout.Arrangement
@@ -10,12 +12,15 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -31,6 +36,7 @@ import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -44,7 +50,6 @@ import androidx.tv.material3.ExperimentalTvMaterial3Api
 import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.Text
 import com.nuvio.tv.ui.components.NuvioDialog
-import com.nuvio.tv.ui.theme.NuvioColors
 
 @Composable
 fun MDBListSettingsContent(
@@ -67,8 +72,12 @@ fun MDBListSettingsContent(
                 .fillMaxWidth()
                 .weight(1f)
         ) {
+            val mdbListState = rememberLazyListState()
+            Box(modifier = Modifier.fillMaxSize()) {
             LazyColumn(
-                contentPadding = PaddingValues(bottom = 8.dp),
+                state = mdbListState,
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(bottom = NuvioTheme.spacing.sm),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 item(key = "mdblist_enabled") {
@@ -77,11 +86,14 @@ fun MDBListSettingsContent(
                         subtitle = stringResource(R.string.mdblist_enable_subtitle),
                         checked = uiState.enabled,
                         onToggle = { viewModel.onEvent(MDBListSettingsEvent.ToggleEnabled(!uiState.enabled)) },
-                        modifier = if (initialFocusRequester != null) {
+                        modifier = Modifier
+                            .padding(top = NuvioTheme.spacing.xxs)
+                            .then(
+                                if (initialFocusRequester != null) {
                             Modifier.focusRequester(initialFocusRequester)
                         } else {
                             Modifier
-                        }
+                        })
                     )
                 }
 
@@ -164,6 +176,18 @@ fun MDBListSettingsContent(
                         onToggle = { viewModel.onEvent(MDBListSettingsEvent.ToggleMetacritic(!uiState.showMetacritic)) }
                     )
                 }
+
+                item(key = "mdblist_mal") {
+                    SettingsToggleRow(
+                        title = stringResource(R.string.mdblist_mal_title),
+                        subtitle = stringResource(R.string.mdblist_mal_subtitle),
+                        checked = uiState.showMal,
+                        enabled = uiState.enabled,
+                        onToggle = { viewModel.onEvent(MDBListSettingsEvent.ToggleMal(!uiState.showMal)) }
+                    )
+                }
+            }
+            SettingsVerticalScrollIndicators(state = mdbListState)
             }
         }
     }
@@ -213,23 +237,23 @@ private fun MDBListApiKeyDialog(
                 .fillMaxWidth()
                 .onFocusChanged { isInputFocused = it.isFocused || it.hasFocus },
             colors = CardDefaults.colors(
-                containerColor = NuvioColors.BackgroundElevated,
-                focusedContainerColor = NuvioColors.BackgroundElevated
+                containerColor = NuvioTheme.colors.BackgroundElevated,
+                focusedContainerColor = NuvioTheme.colors.BackgroundElevated
             ),
             border = CardDefaults.border(
                 border = Border(
-                    border = androidx.compose.foundation.BorderStroke(1.dp, NuvioColors.Border),
+                    border = androidx.compose.foundation.BorderStroke(NuvioTheme.spacing.hairline, NuvioTheme.colors.Border),
                     shape = androidx.compose.foundation.shape.RoundedCornerShape(10.dp)
                 ),
                 focusedBorder = Border(
-                    border = androidx.compose.foundation.BorderStroke(2.dp, NuvioColors.FocusRing),
+                    border = NuvioTheme.focusRing.border(NuvioTheme.spacing.xxs),
                     shape = androidx.compose.foundation.shape.RoundedCornerShape(10.dp)
                 )
             ),
             shape = CardDefaults.shape(androidx.compose.foundation.shape.RoundedCornerShape(10.dp)),
             scale = CardDefaults.scale(focusedScale = 1f)
         ) {
-            Box(modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp)) {
+            Box(modifier = Modifier.padding(horizontal = 14.dp, vertical = NuvioTheme.spacing.md)) {
                 BasicTextField(
                     value = value,
                     onValueChange = { value = it },
@@ -241,12 +265,13 @@ private fun MDBListApiKeyDialog(
                                 event.nativeKeyEvent.action == KeyEvent.ACTION_DOWN
                         },
                     singleLine = true,
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
                     keyboardActions = KeyboardActions(
                         onDone = { keyboardController?.hide() }
                     ),
-                    textStyle = MaterialTheme.typography.bodyMedium.copy(color = NuvioColors.TextPrimary),
+                    textStyle = MaterialTheme.typography.bodyMedium.copy(color = NuvioTheme.colors.TextPrimary),
                     cursorBrush = SolidColor(
-                        if (isInputFocused) NuvioColors.Primary
+                        if (isInputFocused) NuvioTheme.colors.Primary
                         else androidx.compose.ui.graphics.Color.Transparent
                     ),
                     decorationBox = { innerTextField ->
@@ -254,7 +279,7 @@ private fun MDBListApiKeyDialog(
                             Text(
                                 text = stringResource(R.string.mdblist_dialog_placeholder),
                                 style = MaterialTheme.typography.bodyMedium,
-                                color = NuvioColors.TextTertiary
+                                color = NuvioTheme.colors.TextTertiary
                             )
                         }
                         innerTextField()
@@ -270,28 +295,28 @@ private fun MDBListApiKeyDialog(
             Button(
                 onClick = onDismiss,
                 colors = ButtonDefaults.colors(
-                    containerColor = NuvioColors.BackgroundElevated,
-                    contentColor = NuvioColors.TextPrimary
+                    containerColor = NuvioTheme.colors.BackgroundElevated,
+                    contentColor = NuvioTheme.colors.TextPrimary
                 )
             ) {
                 Text(stringResource(R.string.action_cancel))
             }
-            Spacer(modifier = Modifier.width(8.dp))
+            Spacer(modifier = Modifier.width(NuvioTheme.spacing.sm))
             Button(
                 onClick = onClear,
                 colors = ButtonDefaults.colors(
-                    containerColor = NuvioColors.BackgroundElevated,
-                    contentColor = NuvioColors.TextPrimary
+                    containerColor = NuvioTheme.colors.BackgroundElevated,
+                    contentColor = NuvioTheme.colors.TextPrimary
                 )
             ) {
                 Text(stringResource(R.string.action_clear))
             }
-            Spacer(modifier = Modifier.width(8.dp))
+            Spacer(modifier = Modifier.width(NuvioTheme.spacing.sm))
             Button(
                 onClick = { if (!validating) viewModel.validateAndSaveApiKey(value, onSaved) },
                 colors = ButtonDefaults.colors(
-                    containerColor = NuvioColors.BackgroundCard,
-                    contentColor = NuvioColors.TextPrimary
+                    containerColor = NuvioTheme.colors.BackgroundCard,
+                    contentColor = NuvioTheme.colors.TextPrimary
                 )
             ) {
                 Text(if (validating) stringResource(R.string.action_saving) else stringResource(R.string.action_save))

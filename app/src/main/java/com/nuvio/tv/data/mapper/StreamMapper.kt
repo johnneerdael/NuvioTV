@@ -2,10 +2,19 @@ package com.nuvio.tv.data.mapper
 
 import com.nuvio.tv.data.remote.dto.BehaviorHintsDto
 import com.nuvio.tv.data.remote.dto.ProxyHeadersDto
+import com.nuvio.tv.data.remote.dto.StreamClientResolveParsedDto
+import com.nuvio.tv.data.remote.dto.StreamClientResolveRawDto
+import com.nuvio.tv.data.remote.dto.StreamClientResolveStreamDto
+import com.nuvio.tv.data.remote.dto.StreamClientResolveDto
 import com.nuvio.tv.data.remote.dto.StreamDto
 import com.nuvio.tv.domain.model.ProxyHeaders
 import com.nuvio.tv.domain.model.Stream
 import com.nuvio.tv.domain.model.StreamBehaviorHints
+import com.nuvio.tv.domain.model.Subtitle
+import com.nuvio.tv.domain.model.StreamClientResolve
+import com.nuvio.tv.domain.model.StreamClientResolveParsed
+import com.nuvio.tv.domain.model.StreamClientResolveRaw
+import com.nuvio.tv.domain.model.StreamClientResolveStream
 
 fun StreamDto.toDomain(addonName: String, addonLogo: String?): Stream = Stream(
     name = name,
@@ -18,7 +27,81 @@ fun StreamDto.toDomain(addonName: String, addonLogo: String?): Stream = Stream(
     externalUrl = externalUrl,
     behaviorHints = behaviorHints?.toDomain(),
     addonName = addonName,
-    addonLogo = addonLogo
+    addonLogo = addonLogo,
+    sources = sources,
+    clientResolve = clientResolve?.toDomain(),
+    subtitles = subtitles.orEmpty().mapNotNull { dto ->
+        val url = dto.url.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+        Subtitle(
+            id = dto.id?.takeIf { it.isNotBlank() } ?: url,
+            url = url,
+            lang = dto.lang.ifBlank { "Unknown" },
+            addonName = addonName,
+            addonLogo = addonLogo,
+            isStreamProvided = true,
+            headers = dto.headers
+        )
+    }
+)
+
+fun StreamClientResolveDto.toDomain(): StreamClientResolve = StreamClientResolve(
+    type = type,
+    infoHash = infoHash,
+    fileIdx = fileIdx,
+    magnetUri = magnetUri,
+    sources = sources,
+    torrentName = torrentName,
+    filename = filename,
+    mediaType = mediaType,
+    mediaId = mediaId,
+    mediaOnlyId = mediaOnlyId,
+    title = title,
+    season = season,
+    episode = episode,
+    service = service,
+    serviceIndex = serviceIndex,
+    serviceExtension = serviceExtension,
+    isCached = isCached,
+    stream = stream?.toDomain()
+)
+
+fun StreamClientResolveStreamDto.toDomain(): StreamClientResolveStream = StreamClientResolveStream(
+    raw = raw?.toDomain()
+)
+
+fun StreamClientResolveRawDto.toDomain(): StreamClientResolveRaw = StreamClientResolveRaw(
+    torrentName = torrentName,
+    filename = filename,
+    size = size,
+    folderSize = folderSize,
+    tracker = tracker,
+    indexer = indexer,
+    network = network,
+    parsed = parsed?.toDomain()
+)
+
+fun StreamClientResolveParsedDto.toDomain(): StreamClientResolveParsed = StreamClientResolveParsed(
+    rawTitle = rawTitle,
+    parsedTitle = parsedTitle,
+    year = year,
+    resolution = resolution,
+    seasons = seasons,
+    episodes = episodes,
+    quality = quality,
+    hdr = hdr,
+    codec = codec,
+    audio = audio,
+    channels = channels,
+    languages = languages,
+    group = group,
+    network = network,
+    edition = edition,
+    duration = duration,
+    bitDepth = bitDepth,
+    extended = extended,
+    theatrical = theatrical,
+    remastered = remastered,
+    unrated = unrated
 )
 
 fun BehaviorHintsDto.toDomain(): StreamBehaviorHints = StreamBehaviorHints(

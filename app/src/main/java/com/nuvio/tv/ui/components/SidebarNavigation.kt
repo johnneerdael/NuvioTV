@@ -1,7 +1,7 @@
 package com.nuvio.tv.ui.components
 
 import androidx.compose.animation.animateColorAsState
-import androidx.compose.animation.core.animateIntOffsetAsState
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -32,18 +32,22 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import com.nuvio.tv.R
-import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.unit.dp
+import androidx.tv.material3.Card
+import androidx.tv.material3.CardDefaults
 import androidx.tv.material3.ExperimentalTvMaterial3Api
 import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.Text
-import com.nuvio.tv.ui.theme.NuvioColors
+import com.nuvio.tv.ui.theme.NuvioComponents
+import com.nuvio.tv.ui.theme.NuvioStrokes
+import com.nuvio.tv.ui.theme.NuvioTheme
 
-private val NavItemShape = RoundedCornerShape(14.dp)
-private val NavItemIconShape = RoundedCornerShape(10.dp)
+private val NavItemShape = RoundedCornerShape(NuvioComponents.tokens.sidebar.panelRadius / 2)
+private val NavItemIconShape = RoundedCornerShape(NuvioComponents.tokens.sidebar.panelRadius / 3)
 
 data class SidebarItem(
     val route: String,
@@ -62,32 +66,32 @@ fun SidebarNavigation(
     onFocusChange: (Boolean) -> Unit,
     onNavigate: (String) -> Unit
 ) {
-    val sidebarWidthPx = with(LocalDensity.current) { 260.dp.roundToPx() }
-    val offsetX by animateIntOffsetAsState(
-        targetValue = if (isExpanded) IntOffset.Zero else IntOffset(-sidebarWidthPx, 0),
-        label = "sidebarOffset"
+    val sidebarWidth = NuvioTheme.sizes.sidebar.expandedWidth
+    val sidebarAlpha by animateFloatAsState(
+        targetValue = if (isExpanded) 1f else 0f,
+        label = "sidebarAlpha"
     )
 
     Column(
         modifier = Modifier
-            .offset { offsetX }
-            .width(260.dp)
+            .width(sidebarWidth)
             .fillMaxHeight()
-            .background(NuvioColors.BackgroundElevated)
-            .padding(vertical = 24.dp, horizontal = 16.dp)
+            .graphicsLayer { alpha = sidebarAlpha }
+            .background(NuvioTheme.colors.BackgroundElevated)
+            .padding(vertical = NuvioTheme.spacing.xl, horizontal = NuvioTheme.spacing.lg)
             .onFocusChanged { state ->
                 onFocusChange(state.hasFocus)
                 onExpandedChange(state.hasFocus)
             },
-        verticalArrangement = Arrangement.spacedBy(12.dp)
+        verticalArrangement = Arrangement.spacedBy(NuvioTheme.spacing.md)
     ) {
         Text(
-            text = "NUVIO",
+            text = stringResource(R.string.app_name).uppercase(),
             style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold),
-            color = NuvioColors.Primary
+            color = NuvioTheme.colors.Primary
         )
 
-        Spacer(modifier = Modifier.height(12.dp))
+        Spacer(modifier = Modifier.height(NuvioTheme.spacing.md))
 
         items.forEach { item ->
             SidebarNavItem(
@@ -110,49 +114,64 @@ private fun SidebarNavItem(
 ) {
     var isFocused by remember { mutableStateOf(false) }
     val backgroundColor by animateColorAsState(
-        targetValue = if (isFocused || isSelected) NuvioColors.FocusBackground else Color.Transparent,
+        targetValue = if (isFocused || isSelected) NuvioTheme.colors.FocusBackground else Color.Transparent,
         label = "navItemBackground"
     )
     val borderColor by animateColorAsState(
-        targetValue = if (isFocused) NuvioColors.FocusRing else Color.Transparent,
+        targetValue = if (isFocused) NuvioTheme.colors.FocusRing else Color.Transparent,
         label = "navItemBorder"
     )
 
-    Row(
+    Card(
+        onClick = { onNavigate(item.route) },
         modifier = Modifier
             .fillMaxWidth()
-            .height(56.dp)
-            .clip(NavItemShape)
-            .background(backgroundColor)
-            .border(width = 2.dp, color = borderColor, shape = NavItemShape)
+            .height(NuvioTheme.sizes.settings.railItemHeight)
             .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
             .onFocusChanged { state ->
-                isFocused = state.isFocused
-            }
-            .clickable { onNavigate(item.route) }
-            .padding(horizontal = 12.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                isFocused = state.hasFocus
+            },
+        colors = CardDefaults.colors(
+            containerColor = backgroundColor,
+            focusedContainerColor = backgroundColor,
+        ),
+        border = CardDefaults.border(
+            border = androidx.tv.material3.Border.None,
+            focusedBorder = androidx.tv.material3.Border(
+                border = androidx.compose.foundation.BorderStroke(NuvioStrokes.tokens.focus, borderColor),
+                shape = NavItemShape
+            )
+        ),
+        shape = CardDefaults.shape(shape = NavItemShape)
     ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(NuvioTheme.sizes.settings.railItemHeight)
+                .padding(horizontal = NuvioTheme.spacing.md),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(NuvioTheme.spacing.md)
+        ) {
         Box(
             modifier = Modifier
-                .size(32.dp)
+                .size(NuvioTheme.sizes.icons.xl - NuvioTheme.spacing.xs)
                 .clip(NavItemIconShape)
-                .background(NuvioColors.SurfaceVariant),
+                .background(NuvioTheme.colors.SurfaceVariant),
             contentAlignment = Alignment.Center
         ) {
             Icon(
                 imageVector = item.icon,
                 contentDescription = item.label,
-                tint = NuvioColors.TextPrimary,
-                modifier = Modifier.size(18.dp)
+                tint = NuvioTheme.colors.TextPrimary,
+                modifier = Modifier.size(NuvioTheme.sizes.icons.sm)
             )
         }
 
         Text(
             text = item.label,
             style = MaterialTheme.typography.titleMedium,
-            color = if (isFocused || isSelected) NuvioColors.TextPrimary else NuvioColors.TextSecondary
+            color = if (isFocused || isSelected) NuvioTheme.colors.TextPrimary else NuvioTheme.colors.TextSecondary
         )
+    }
     }
 }

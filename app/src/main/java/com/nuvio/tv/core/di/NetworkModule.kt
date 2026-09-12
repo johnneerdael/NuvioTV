@@ -6,17 +6,29 @@ import com.nuvio.tv.BuildConfig
 import com.nuvio.tv.data.remote.api.AddonApi
 import com.nuvio.tv.data.remote.api.AniSkipApi
 import com.nuvio.tv.data.remote.api.AnimeSkipApi
-import com.nuvio.tv.data.remote.api.ArmApi
-import com.nuvio.tv.data.remote.api.DonationsApi
+import com.nuvio.tv.data.remote.api.AuthDiagnosticReportApi
 import com.nuvio.tv.data.remote.api.GitHubReleaseApi
+import com.nuvio.tv.data.remote.api.SupportersApi
 import com.nuvio.tv.data.remote.api.TraktApi
 import com.nuvio.tv.data.remote.api.TrailerApi
 import com.nuvio.tv.data.remote.api.IntroDbApi
 import com.nuvio.tv.data.remote.api.ImdbTapframeApi
 import com.nuvio.tv.data.remote.api.MDBListApi
 import com.nuvio.tv.data.remote.api.ParentalGuideApi
+import com.nuvio.tv.data.remote.api.PlaybackIssueReportApi
+import com.nuvio.tv.data.remote.api.PremiumizeApi
+import com.nuvio.tv.data.remote.api.RealDebridApi
 import com.nuvio.tv.data.remote.api.SeriesGraphApi
 import com.nuvio.tv.data.remote.api.TmdbApi
+import com.nuvio.tv.data.remote.api.TorboxApi
+import com.nuvio.tv.data.remote.api.UniqueContributionsApi
+import com.nuvio.tv.data.simkl.OkHttpSimklEngine
+import com.nuvio.tv.data.simkl.SimklApiClient
+import com.nuvio.tv.data.simkl.SimklApiConfiguration
+import com.nuvio.tv.data.simkl.SimklAuthError
+import com.nuvio.tv.data.simkl.SimklAuthStorage
+import com.nuvio.tv.data.simkl.defaultSimklApiConfiguration
+import com.nuvio.tv.LocaleCache
 import com.squareup.moshi.Moshi
 import com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory
 import dagger.Module
@@ -29,15 +41,50 @@ import okhttp3.OkHttpClient
 import okhttp3.logging.HttpLoggingInterceptor
 import retrofit2.Retrofit
 import retrofit2.converter.moshi.MoshiConverterFactory
+import com.nuvio.tv.core.network.IPv4FirstDns
+import com.nuvio.tv.core.diagnostics.SentryNetworkBreadcrumbInterceptor
 import java.io.File
+import java.security.SecureRandom
+import java.security.cert.X509Certificate
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
 import javax.inject.Named
 import javax.inject.Singleton
+import javax.net.ssl.SSLContext
+import javax.net.ssl.TrustManager
+import javax.net.ssl.X509TrustManager
 
 private object TraktHttpTrace {
     private val requestCounter = AtomicLong(0L)
     fun nextRequestId(): Long = requestCounter.incrementAndGet()
+}
+
+private fun normalizedBaseUrl(rawUrl: String, fallback: String): String {
+    val trimmed = rawUrl.trim()
+    if (trimmed.isBlank()) return fallback
+    return if (trimmed.endsWith('/')) trimmed else "$trimmed/"
+}
+
+/**
+ * Builds the value sent in the `Accept-Language` request header so addons can
+ * serve localized payloads (catalog names, descriptions, etc.). Falls back to
+ * the system locale when the user has not overridden the app language. The
+ * primary tag is given the highest q-weight; English is appended at q=0.7 as
+ * a sensible fallback for addons that don't support the requested locale.
+ */
+private fun buildAcceptLanguageHeader(): String {
+    val explicit = LocaleCache.localeTag
+        .takeIf { it.isNotBlank() && it != LocaleCache.UNSET }
+    val primaryTag = (explicit ?: java.util.Locale.getDefault().toLanguageTag())
+        .takeIf { it.isNotBlank() && it != "und" }
+        ?: "en"
+    return if (primaryTag.equals("en", ignoreCase = true) ||
+        primaryTag.startsWith("en-", ignoreCase = true)
+    ) {
+        primaryTag
+    } else {
+        "$primaryTag,en;q=0.7"
+    }
 }
 
 @Module
@@ -50,17 +97,142 @@ object NetworkModule {
         .add(KotlinJsonAdapterFactory())
         .build()
 
+    /** Validating client for fixed first-party endpoints. Addon URLs use `addonPermissive`. */
     @Provides
     @Singleton
-    fun provideOkHttpClient(@ApplicationContext context: Context): OkHttpClient = OkHttpClient.Builder()
-        .cache(Cache(File(context.cacheDir, "http_cache"), 50L * 1024 * 1024)) // 50 MB disk cache
+    fun provideOkHttpClient(@ApplicationContext context: Context): OkHttpClient {
+        return OkHttpClient.Builder()
+            .dns(IPv4FirstDns())
+            // Keep separate from the old trust-all cache. Cached responses bypass a new TLS handshake.
+            .cache(Cache(File(context.cacheDir, "http_cache_v2"), 50L * 1024 * 1024)) // 50 MB disk cache
+            .connectTimeout(30, TimeUnit.SECONDS)
+            .readTimeout(60, TimeUnit.SECONDS)
+            .addInterceptor { chain ->
+                val version = BuildConfig.VERSION_NAME.ifBlank { "dev" }
+                val request = chain.request().newBuilder()
+                    .header("User-Agent", "Nuvio/$version")
+                    .header("Accept-Language", buildAcceptLanguageHeader())
+                    .build()
+                chain.proceed(request)
+            }
+            .addInterceptor(SentryNetworkBreadcrumbInterceptor())
+            // Prevent OkHttp from caching error responses (4xx/5xx).
+            .addNetworkInterceptor { chain ->
+                val response = chain.proceed(chain.request())
+                if (response.code in 400..599) {
+                    response.newBuilder()
+                        .header("Cache-Control", "no-store")
+                        .build()
+                } else {
+                    response
+                }
+            }
+            .addInterceptor(HttpLoggingInterceptor().apply {
+                level = if (BuildConfig.DEBUG) HttpLoggingInterceptor.Level.BASIC
+                        else HttpLoggingInterceptor.Level.NONE
+            })
+            .build()
+    }
+
+    /**
+     * Permissive client for addon-provided URLs, including self-hosted servers with self-signed
+     * certificates. Uses a separate cache from first-party traffic.
+     *
+     * Do not use for first-party endpoints.
+     */
+    @Provides
+    @Singleton
+    @Named("addonPermissive")
+    fun provideAddonPermissiveOkHttpClient(
+        @ApplicationContext context: Context,
+        okHttpClient: OkHttpClient
+    ): OkHttpClient {
+        val trustAllManager = object : X509TrustManager {
+            override fun checkClientTrusted(chain: Array<out X509Certificate>?, authType: String?) = Unit
+            override fun checkServerTrusted(chain: Array<out X509Certificate>?, authType: String?) = Unit
+            override fun getAcceptedIssuers(): Array<X509Certificate> = emptyArray()
+        }
+        val sslContext = SSLContext.getInstance("TLS").apply {
+            init(null, arrayOf<TrustManager>(trustAllManager), SecureRandom())
+        }
+        return okHttpClient.newBuilder()
+            .cache(Cache(File(context.cacheDir, "addon_http_cache"), 50L * 1024 * 1024))
+            .sslSocketFactory(sslContext.socketFactory, trustAllManager)
+            .hostnameVerifier { _, _ -> true }
+            .build()
+    }
+
+    @Provides
+    @Singleton
+    @Named("customServerAuth")
+    fun provideCustomServerAuthHttpClient(): OkHttpClient = OkHttpClient.Builder()
+        .dns(IPv4FirstDns())
         .connectTimeout(30, TimeUnit.SECONDS)
-        .readTimeout(30, TimeUnit.SECONDS)
+        .readTimeout(60, TimeUnit.SECONDS)
+        .addInterceptor { chain ->
+            val version = BuildConfig.VERSION_NAME.ifBlank { "dev" }
+            val request = chain.request().newBuilder()
+                .header("User-Agent", "Nuvio/$version")
+                .header("Accept-Language", buildAcceptLanguageHeader())
+                .build()
+            chain.proceed(request)
+        }
         .addInterceptor(HttpLoggingInterceptor().apply {
             level = if (BuildConfig.DEBUG) HttpLoggingInterceptor.Level.BASIC
-                    else HttpLoggingInterceptor.Level.NONE
+            else HttpLoggingInterceptor.Level.NONE
         })
         .build()
+
+    @Provides
+    @Singleton
+    @Named("directDebrid")
+    fun provideDirectDebridOkHttpClient(): OkHttpClient =
+        OkHttpClient.Builder()
+            .dns(IPv4FirstDns())
+            .connectTimeout(30, TimeUnit.SECONDS)
+            .readTimeout(30, TimeUnit.SECONDS)
+            .addInterceptor { chain ->
+                val version = BuildConfig.VERSION_NAME.ifBlank { "dev" }
+                val request = chain.request().newBuilder()
+                    .header("User-Agent", "Nuvio/$version")
+                    .header("Accept-Language", buildAcceptLanguageHeader())
+                    .build()
+                chain.proceed(request)
+            }
+            .addInterceptor(SentryNetworkBreadcrumbInterceptor())
+            .build()
+
+    @Provides
+    @Singleton
+    @Named("simkl")
+    fun provideSimklOkHttpClient(): OkHttpClient = OkHttpClient.Builder()
+        .dns(IPv4FirstDns())
+        .connectTimeout(30, TimeUnit.SECONDS)
+        .readTimeout(60, TimeUnit.SECONDS)
+        .build()
+
+    @Provides
+    @Singleton
+    fun provideSimklApiConfiguration(): SimklApiConfiguration = defaultSimklApiConfiguration()
+
+    @Provides
+    @Singleton
+    fun provideSimklApiClient(
+        @Named("simkl") okHttpClient: OkHttpClient,
+        configuration: SimklApiConfiguration,
+        storage: SimklAuthStorage
+    ): SimklApiClient = SimklApiClient(
+        engine = OkHttpSimklEngine(okHttpClient),
+        configuration = configuration,
+        authorization = storage::authorization,
+        onUnauthorized = { authorization ->
+            storage.clearAuth(
+                error = SimklAuthError.AUTHORIZATION_REVOKED,
+                scope = authorization.scope,
+                expectedAccessToken = authorization.accessToken
+            )
+        }
+    )
 
     @Provides
     @Singleton
@@ -125,7 +297,10 @@ object NetworkModule {
 
     @Provides
     @Singleton
-    fun provideRetrofit(okHttpClient: OkHttpClient, moshi: Moshi): Retrofit =
+    fun provideRetrofit(
+        @Named("addonPermissive") okHttpClient: OkHttpClient,
+        moshi: Moshi
+    ): Retrofit =
         Retrofit.Builder()
             .baseUrl("https://placeholder.nuvio.tv/")
             .client(okHttpClient)
@@ -162,6 +337,60 @@ object NetworkModule {
 
     @Provides
     @Singleton
+    @Named("torbox")
+    fun provideTorboxRetrofit(
+        @Named("directDebrid") okHttpClient: OkHttpClient,
+        moshi: Moshi
+    ): Retrofit =
+        Retrofit.Builder()
+            .baseUrl("https://api.torbox.app/")
+            .client(okHttpClient)
+            .addConverterFactory(MoshiConverterFactory.create(moshi))
+            .build()
+
+    @Provides
+    @Singleton
+    fun provideTorboxApi(@Named("torbox") retrofit: Retrofit): TorboxApi =
+        retrofit.create(TorboxApi::class.java)
+
+    @Provides
+    @Singleton
+    @Named("realdebrid")
+    fun provideRealDebridRetrofit(
+        @Named("directDebrid") okHttpClient: OkHttpClient,
+        moshi: Moshi
+    ): Retrofit =
+        Retrofit.Builder()
+            .baseUrl("https://api.real-debrid.com/rest/1.0/")
+            .client(okHttpClient)
+            .addConverterFactory(MoshiConverterFactory.create(moshi))
+            .build()
+
+    @Provides
+    @Singleton
+    fun provideRealDebridApi(@Named("realdebrid") retrofit: Retrofit): RealDebridApi =
+        retrofit.create(RealDebridApi::class.java)
+
+    @Provides
+    @Singleton
+    @Named("premiumize")
+    fun providePremiumizeRetrofit(
+        @Named("directDebrid") okHttpClient: OkHttpClient,
+        moshi: Moshi
+    ): Retrofit =
+        Retrofit.Builder()
+            .baseUrl("https://www.premiumize.me/")
+            .client(okHttpClient)
+            .addConverterFactory(MoshiConverterFactory.create(moshi))
+            .build()
+
+    @Provides
+    @Singleton
+    fun providePremiumizeApi(@Named("premiumize") retrofit: Retrofit): PremiumizeApi =
+        retrofit.create(PremiumizeApi::class.java)
+
+    @Provides
+    @Singleton
     fun provideTmdbApi(@Named("tmdb") retrofit: Retrofit): TmdbApi =
         retrofit.create(TmdbApi::class.java)
 
@@ -175,7 +404,7 @@ object NetworkModule {
     @Named("parentalGuide")
     fun provideParentalGuideRetrofit(okHttpClient: OkHttpClient, moshi: Moshi): Retrofit =
         Retrofit.Builder()
-            .baseUrl(BuildConfig.PARENTAL_GUIDE_API_URL.ifEmpty { "https://localhost/" })
+            .baseUrl("https://api.tiffara.com/")
             .client(okHttpClient)
             .addConverterFactory(MoshiConverterFactory.create(moshi))
             .build()
@@ -219,21 +448,6 @@ object NetworkModule {
 
     @Provides
     @Singleton
-    @Named("arm")
-    fun provideArmRetrofit(okHttpClient: OkHttpClient, moshi: Moshi): Retrofit =
-        Retrofit.Builder()
-            .baseUrl("https://arm.haglund.dev/api/v2/")
-            .client(okHttpClient)
-            .addConverterFactory(MoshiConverterFactory.create(moshi))
-            .build()
-
-    @Provides
-    @Singleton
-    fun provideArmApi(@Named("arm") retrofit: Retrofit): ArmApi =
-        retrofit.create(ArmApi::class.java)
-
-    @Provides
-    @Singleton
     @Named("animeSkipGql")
     fun provideAnimeSkipGqlRetrofit(okHttpClient: OkHttpClient, moshi: Moshi): Retrofit =
         Retrofit.Builder()
@@ -266,23 +480,59 @@ object NetworkModule {
 
     @Provides
     @Singleton
-    @Named("donations")
-    fun provideDonationsRetrofit(okHttpClient: OkHttpClient, moshi: Moshi): Retrofit {
-        val baseUrl = BuildConfig.DONATIONS_BASE_URL
-            .takeIf { it.isNotBlank() }
-            ?: error("DONATIONS_BASE_URL is missing. Set it in local.properties or local.dev.properties.")
-
-        return Retrofit.Builder()
-            .baseUrl(baseUrl)
-            .client(okHttpClient)
-            .addConverterFactory(MoshiConverterFactory.create(moshi))
-            .build()
-    }
+    @Named("uniqueContributionsBaseUrl")
+    fun provideUniqueContributionsBaseUrl(): String =
+        BuildConfig.UNIQUE_CONTRIBUTIONS_BASE_URL
 
     @Provides
     @Singleton
-    fun provideDonationsApi(@Named("donations") retrofit: Retrofit): DonationsApi =
-        retrofit.create(DonationsApi::class.java)
+    @Named("uniqueContributions")
+    fun provideUniqueContributionsRetrofit(okHttpClient: OkHttpClient, moshi: Moshi): Retrofit =
+        Retrofit.Builder()
+            .baseUrl(normalizedBaseUrl(BuildConfig.UNIQUE_CONTRIBUTIONS_BASE_URL, "https://localhost/"))
+            .client(okHttpClient)
+            .addConverterFactory(MoshiConverterFactory.create(moshi))
+            .build()
+
+    @Provides
+    @Singleton
+    fun provideUniqueContributionsApi(@Named("uniqueContributions") retrofit: Retrofit): UniqueContributionsApi =
+        retrofit.create(UniqueContributionsApi::class.java)
+
+    @Provides
+    @Singleton
+    @Named("supporters")
+    fun provideSupportersRetrofit(okHttpClient: OkHttpClient, moshi: Moshi): Retrofit =
+        Retrofit.Builder()
+            .baseUrl(normalizedBaseUrl(BuildConfig.SUPPORTERS_API_BASE_URL, "https://nuvio.tv/"))
+            .client(okHttpClient)
+            .addConverterFactory(MoshiConverterFactory.create(moshi))
+            .build()
+
+    @Provides
+    @Singleton
+    fun provideSupportersApi(@Named("supporters") retrofit: Retrofit): SupportersApi =
+        retrofit.create(SupportersApi::class.java)
+
+    @Provides
+    @Singleton
+    @Named("playbackReports")
+    fun providePlaybackReportsRetrofit(okHttpClient: OkHttpClient, moshi: Moshi): Retrofit =
+        Retrofit.Builder()
+            .baseUrl(normalizedBaseUrl(BuildConfig.PLAYBACK_REPORTS_BASE_URL, "https://localhost/"))
+            .client(okHttpClient)
+            .addConverterFactory(MoshiConverterFactory.create(moshi))
+            .build()
+
+    @Provides
+    @Singleton
+    fun providePlaybackIssueReportApi(@Named("playbackReports") retrofit: Retrofit): PlaybackIssueReportApi =
+        retrofit.create(PlaybackIssueReportApi::class.java)
+
+    @Provides
+    @Singleton
+    fun provideAuthDiagnosticReportApi(@Named("playbackReports") retrofit: Retrofit): AuthDiagnosticReportApi =
+        retrofit.create(AuthDiagnosticReportApi::class.java)
 
     // --- Trailer API ---
 
